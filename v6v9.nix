@@ -280,22 +280,19 @@ let
         ${if includeDevDependencies then "export NPM_CONFIG_PRODUCTION=false" else ""}
 
         # Create pnpm wrapper to force offline mode for nested installs
-        realPnpm="${pkgs.pnpm}/bin/pnpm"
         mkdir -p "$TMPDIR/bin"
-        cat > "$TMPDIR/bin/pnpm" <<EOF
+        cat > "$TMPDIR/bin/pnpm" <<'EOF'
         #!/usr/bin/env bash
         set -euo pipefail
-        
-        # Use the same temp store directory deterministically
-        STORE_DIR="\''${TMPDIR}/pnpm-store"
-        mkdir -p "\$STORE_DIR"
-        
-        case "\$1" in
+        REAL_PNPM="${pkgs.pnpm}/bin/pnpm"
+        STORE_DIR="$TMPDIR/pnpm-store"
+        mkdir -p "$STORE_DIR"
+        case "$1" in
           install|fetch|add|update)
-            exec "$realPnpm" "\$@" --offline --frozen-lockfile --store-dir "\$STORE_DIR"
+            exec "$REAL_PNPM" "$@" --offline --frozen-lockfile --store-dir "$STORE_DIR"
             ;;
           *)
-            exec "$realPnpm" "\$@"
+            exec "$REAL_PNPM" "$@"
             ;;
         esac
         EOF
