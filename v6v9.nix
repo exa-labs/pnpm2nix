@@ -177,6 +177,7 @@ let
     packagePath ? ".",
     buildScript ? "build",
     installPhase ? null,
+    includeDevDependencies ? true,
     nativeBuildInputs ? [],
     buildInputs ? [],
     ...
@@ -231,9 +232,8 @@ let
                     entry = section[key]
                     if isinstance(entry, dict) and 'resolution' in entry:
                         if isinstance(entry['resolution'], dict):
-                            if 'tarball' not in entry['resolution']:
-                                entry['resolution']['tarball'] = f"file://{tarball_path}"
-                                patches_applied += 1
+                            entry['resolution']['tarball'] = f"file://{tarball_path}"
+                            patches_applied += 1
                 
                 if section_name == 'snapshots':
                     for snapshot_key in section.keys():
@@ -242,9 +242,8 @@ let
                             entry = section[snapshot_key]
                             if isinstance(entry, dict) and 'resolution' in entry:
                                 if isinstance(entry['resolution'], dict):
-                                    if 'tarball' not in entry['resolution']:
-                                        entry['resolution']['tarball'] = f"file://{tarball_path}"
-                                        patches_applied += 1
+                                    entry['resolution']['tarball'] = f"file://{tarball_path}"
+                                    patches_applied += 1
 
         with open(lockfile_path, 'w') as f:
             yaml.dump(lockfile, f)
@@ -273,12 +272,38 @@ let
         
         echo "store-dir=$STORE_DIR" >> "$HOME/.npmrc"
 
+        # Environment hardening to prevent network access
+        export NPM_CONFIG_OFFLINE=true
+        export NPM_CONFIG_AUDIT=false
+        export NPM_CONFIG_FUND=false
+        export npm_config_update_notifier=false
+        ${if includeDevDependencies then "export NPM_CONFIG_PRODUCTION=false" else ""}
+
+        # Create pnpm wrapper to force offline mode for nested installs
+        mkdir -p "$TMPDIR/bin"
+        cat > "$TMPDIR/bin/pnpm" << 'PNPM_WRAPPER_EOF'
+        #!/usr/bin/env bash
+        REAL_PNPM="${pkgs.pnpm}/bin/pnpm"
+        
+        # Force offline flags for install/fetch commands
+        case "$1" in
+          install|fetch|add|update)
+            exec "$REAL_PNPM" "$@" --offline --frozen-lockfile --store-dir "$STORE_DIR"
+            ;;
+          *)
+            exec "$REAL_PNPM" "$@"
+            ;;
+        esac
+        PNPM_WRAPPER_EOF
+        chmod +x "$TMPDIR/bin/pnpm"
+        export PATH="$TMPDIR/bin:$PATH"
+
         ${pkgs.python3}/bin/python3 -c '${patchScript}'
 
-        pnpm fetch --offline --frozen-lockfile --store-dir "$STORE_DIR"
-        pnpm install --frozen-lockfile --offline --store-dir "$STORE_DIR"
+        ${pkgs.pnpm}/bin/pnpm fetch --offline --frozen-lockfile --store-dir "$STORE_DIR"
+        ${pkgs.pnpm}/bin/pnpm install --frozen-lockfile --offline --store-dir "$STORE_DIR" ${if includeDevDependencies then "--prod=false" else ""}
 
-        ${buildCommand}
+        ${if buildScript != null then buildCommand else ""}
       '';
 
       installPhase = if installPhase != null then installPhase else defaultInstallPhase;
@@ -291,6 +316,7 @@ let
       "packagePath"
       "buildScript"
       "installPhase"
+      "includeDevDependencies"
       "nativeBuildInputs"
       "buildInputs"
     ]);
