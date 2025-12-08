@@ -182,6 +182,8 @@ EOF
     includeDevDependencies ? true,
     nativeBuildInputs ? [],
     buildInputs ? [],
+    preBuild ? "",
+    postBuild ? "",
     ...
   }@args:
     let
@@ -365,14 +367,17 @@ PY
 
         ${pkgs.python3}/bin/python3 patch.py
 
-        runHook preBuild
-
         ${pkgs.pnpm}/bin/pnpm fetch --offline --frozen-lockfile --store-dir "$STORE_DIR" --config.manage-package-manager-versions=false
         ${pkgs.pnpm}/bin/pnpm install --frozen-lockfile --offline --store-dir "$STORE_DIR" --config.manage-package-manager-versions=false ${if includeDevDependencies then "--prod=false" else ""}
 
+        # Set up PATH to include node_modules/.bin for build tools
+        export PATH="$PWD/node_modules/.bin:$PATH"
+
+        ${preBuild}
+
         ${if buildScript != null then buildCommand else ""}
         
-        runHook postBuild
+        ${postBuild}
       '';
 
       installPhase = if installPhase != null then installPhase else defaultInstallPhase;
