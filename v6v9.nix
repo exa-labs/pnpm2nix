@@ -314,7 +314,7 @@ EOF
 
         # Run pnpm fetch and install with lockfile-dir
         ${pkgs.pnpm}/bin/pnpm fetch --offline --frozen-lockfile --store-dir "$STORE_DIR" --lockfile-dir "$LOCK_DIR" --config.manage-package-manager-versions=false
-        ${pkgs.pnpm}/bin/pnpm install --frozen-lockfile --offline --store-dir "$STORE_DIR" --lockfile-dir "$LOCK_DIR" -C "$PKG_DIR" --config.manage-package-manager-versions=false ${if includeDevDependencies then "--prod=false" else ""}
+        ${pkgs.pnpm}/bin/pnpm install --frozen-lockfile --offline --store-dir "$STORE_DIR" --lockfile-dir "$LOCK_DIR" -C "$PKG_DIR" --config.manage-package-manager-versions=false --force ${if includeDevDependencies then "--prod=false" else ""}
 
         # Set up PATH to include node_modules/.bin for build tools from the package directory
         export PATH="$PWD/$PKG_DIR/node_modules/.bin:$PATH"
