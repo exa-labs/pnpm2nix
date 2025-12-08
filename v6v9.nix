@@ -204,7 +204,8 @@ EOF
       else
         "pnpm run ${buildScript}";
 
-      patchScript = ''
+      # Create patch.py as a separate file to avoid heredoc issues
+      patchPy = pkgs.writeText "patch.py" ''
         import json
         import sys
         from ruamel.yaml import YAML
@@ -268,6 +269,7 @@ EOF
 
       buildPhase = ''
         set -euo pipefail
+        set -x  # Enable command tracing for debugging
         
         export HOME=$TMPDIR/home
         mkdir -p "$HOME"
@@ -275,13 +277,8 @@ EOF
         STORE_DIR="$TMPDIR/pnpm-store"
         mkdir -p "$STORE_DIR"
         
-        # Configure pnpm to prevent self-management and network access
-        cat > "$HOME/.npmrc" <<EOF
-store-dir=$STORE_DIR
-manage-package-manager-versions=false
-EOF
-
-        # Environment hardening to prevent network access
+        # Configure pnpm via environment variables (no .npmrc file needed)
+        export PNPM_STORE_DIR="$STORE_DIR"
         export PNPM_HOME="${pkgs.pnpm}/bin"
         export NPM_CONFIG_OFFLINE=true
         export NPM_CONFIG_AUDIT=false
@@ -290,82 +287,14 @@ EOF
         export npm_config_manage_package_manager_versions=false
         ${if includeDevDependencies then "export NPM_CONFIG_PRODUCTION=false" else ""}
 
-        # Create pnpm wrapper to force offline mode for nested installs
-        mkdir -p "$TMPDIR/bin"
-        cat > "$TMPDIR/bin/pnpm" <<'EOF'
-        #!/usr/bin/env bash
-        set -euo pipefail
-        REAL_PNPM="${pkgs.pnpm}/bin/pnpm"
-        STORE_DIR="$TMPDIR/pnpm-store"
-        mkdir -p "$STORE_DIR"
-        case "$1" in
-          install|fetch|add|update)
-            exec "$REAL_PNPM" "$@" --offline --frozen-lockfile --store-dir "$STORE_DIR"
-            ;;
-          *)
-            exec "$REAL_PNPM" "$@"
-            ;;
-        esac
-        EOF
-        chmod +x "$TMPDIR/bin/pnpm"
-        export PATH="$TMPDIR/bin:$PATH"
-
-        # Write and run the patcher - use unquoted heredoc for Nix interpolation
-        cat > patch.py <<PY
-import json
-from ruamel.yaml import YAML
-
-lockfile_path = 'pnpm-lock.yaml'
-manifest_path = '${pnpmTarballs}/manifest.json'
-
-yaml = YAML()
-yaml.preserve_quotes = True
-yaml.default_flow_style = False
-
-with open(manifest_path, 'r') as f:
-    manifest = json.load(f)
-
-with open(lockfile_path, 'r') as f:
-    lockfile = yaml.load(f)
-
-patches_applied = 0
-sections_to_patch = []
-if 'packages' in lockfile:
-    sections_to_patch.append(('packages', lockfile['packages']))
-if 'snapshots' in lockfile:
-    sections_to_patch.append(('snapshots', lockfile['snapshots']))
-
-for section_name, section in sections_to_patch:
-    for key, tarball_path in manifest.items():
-        if key in section:
-            entry = section[key]
-            if isinstance(entry, dict) and 'resolution' in entry and isinstance(entry['resolution'], dict):
-                entry['resolution']['tarball'] = f"file://{tarball_path}"
-                patches_applied += 1
-
-        if section_name == 'snapshots':
-            for snapshot_key in section.keys():
-                normalized_key = snapshot_key.split('(')[0]
-                if normalized_key == key:
-                    entry = section[snapshot_key]
-                    if isinstance(entry, dict) and 'resolution' in entry and isinstance(entry['resolution'], dict):
-                        entry['resolution']['tarball'] = f"file://{tarball_path}"
-                        patches_applied += 1
-
-with open(lockfile_path, 'w') as f:
-    yaml.dump(lockfile, f)
-PY
-
         # Remove packageManager field from package.json BEFORE running pnpm commands
         if [ -f package.json ]; then
           echo "Removing packageManager field from package.json"
-          cat package.json | grep -i packageManager || true
           ${pkgs.jq}/bin/jq 'del(.packageManager)' package.json > package.json.tmp && mv package.json.tmp package.json
-          echo "After removal:"
-          cat package.json | grep -i packageManager || true
         fi
 
-        ${pkgs.python3}/bin/python3 patch.py
+        # Run the patcher
+        ${pkgs.python3}/bin/python3 ${patchPy}
 
         ${pkgs.pnpm}/bin/pnpm fetch --offline --frozen-lockfile --store-dir "$STORE_DIR" --config.manage-package-manager-versions=false
         ${pkgs.pnpm}/bin/pnpm install --frozen-lockfile --offline --store-dir "$STORE_DIR" --config.manage-package-manager-versions=false ${if includeDevDependencies then "--prod=false" else ""}
