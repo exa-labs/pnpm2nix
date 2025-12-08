@@ -204,13 +204,18 @@ EOF
       else
         "pnpm run ${buildScript}";
 
+      # Compute lockfile directory and package directory
+      lockDir = builtins.dirOf lockFile;
+      lockFileName = builtins.baseNameOf lockFile;
+      
       # Create patch.py as a separate file to avoid heredoc issues
       patchPy = pkgs.writeText "patch.py" ''
         import json
         import sys
+        import os
         from ruamel.yaml import YAML
 
-        lockfile_path = 'pnpm-lock.yaml'
+        lockfile_path = os.path.join('${lockDir}', '${lockFileName}')
         manifest_path = '${pnpmTarballs}/manifest.json'
 
         with open(manifest_path, 'r') as f:
@@ -287,24 +292,33 @@ EOF
         export npm_config_manage_package_manager_versions=false
         ${if includeDevDependencies then "export NPM_CONFIG_PRODUCTION=false" else ""}
 
-        # Remove packageManager field from package.json BEFORE running pnpm commands
-        if [ -f package.json ]; then
-          echo "Removing packageManager field from package.json"
-          ${pkgs.jq}/bin/jq 'del(.packageManager)' package.json > package.json.tmp && mv package.json.tmp package.json
+        # Set lockfile directory and package directory
+        LOCK_DIR="${lockDir}"
+        PKG_DIR="${packagePath}"
+
+        # Remove packageManager field from package.json in the package directory
+        if [ -f "$PKG_DIR/package.json" ]; then
+          echo "Removing packageManager field from $PKG_DIR/package.json"
+          ${pkgs.jq}/bin/jq 'del(.packageManager)' "$PKG_DIR/package.json" > "$PKG_DIR/package.json.tmp" && mv "$PKG_DIR/package.json.tmp" "$PKG_DIR/package.json"
         fi
 
         # Run the patcher
         ${pkgs.python3}/bin/python3 ${patchPy}
 
-        ${pkgs.pnpm}/bin/pnpm fetch --offline --frozen-lockfile --store-dir "$STORE_DIR" --config.manage-package-manager-versions=false
-        ${pkgs.pnpm}/bin/pnpm install --frozen-lockfile --offline --store-dir "$STORE_DIR" --config.manage-package-manager-versions=false ${if includeDevDependencies then "--prod=false" else ""}
+        # Run pnpm fetch and install with lockfile-dir
+        ${pkgs.pnpm}/bin/pnpm fetch --offline --frozen-lockfile --store-dir "$STORE_DIR" --lockfile-dir "$LOCK_DIR" --config.manage-package-manager-versions=false
+        ${pkgs.pnpm}/bin/pnpm install --frozen-lockfile --offline --store-dir "$STORE_DIR" --lockfile-dir "$LOCK_DIR" -C "$PKG_DIR" --config.manage-package-manager-versions=false ${if includeDevDependencies then "--prod=false" else ""}
 
-        # Set up PATH to include node_modules/.bin for build tools
-        export PATH="$PWD/node_modules/.bin:$PATH"
+        # Set up PATH to include node_modules/.bin for build tools from the package directory
+        export PATH="$PWD/$PKG_DIR/node_modules/.bin:$PATH"
 
         ${preBuild}
 
-        ${if buildScript != null then buildCommand else ""}
+        ${if buildScript != null then 
+          "cd \"$PKG_DIR\" && " + buildCommand
+        else 
+          ""
+        }
         
         ${postBuild}
       '';
