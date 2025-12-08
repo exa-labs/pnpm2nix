@@ -259,6 +259,7 @@ EOF
         nodejs
         pnpm
         python3Packages.ruamel-yaml
+        jq
       ] ++ nativeBuildInputs;
 
       inherit buildInputs;
