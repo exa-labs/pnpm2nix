@@ -355,6 +355,11 @@ PY
 
         ${pkgs.python3}/bin/python3 patch.py
 
+        # Remove packageManager field from package.json to prevent pnpm from trying to install itself
+        if [ -f package.json ]; then
+          ${pkgs.jq}/bin/jq 'del(.packageManager)' package.json > package.json.tmp && mv package.json.tmp package.json
+        fi
+
         ${pkgs.pnpm}/bin/pnpm fetch --offline --frozen-lockfile --store-dir "$STORE_DIR" --config.manage-package-manager-versions=false
         ${pkgs.pnpm}/bin/pnpm install --frozen-lockfile --offline --store-dir "$STORE_DIR" --config.manage-package-manager-versions=false ${if includeDevDependencies then "--prod=false" else ""}
 
