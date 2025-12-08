@@ -265,8 +265,6 @@ EOF
       inherit buildInputs;
 
       buildPhase = ''
-        runHook preBuild
-        
         set -euo pipefail
         
         export HOME=$TMPDIR/home
@@ -366,6 +364,8 @@ PY
         fi
 
         ${pkgs.python3}/bin/python3 patch.py
+
+        runHook preBuild
 
         ${pkgs.pnpm}/bin/pnpm fetch --offline --frozen-lockfile --store-dir "$STORE_DIR" --config.manage-package-manager-versions=false
         ${pkgs.pnpm}/bin/pnpm install --frozen-lockfile --offline --store-dir "$STORE_DIR" --config.manage-package-manager-versions=false ${if includeDevDependencies then "--prod=false" else ""}
