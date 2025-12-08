@@ -162,9 +162,11 @@ let
       '' + lib.concatMapStringsSep "\n" (item:
         ''cp "${item.drv}" "$out/$(basename "${item.drv}")"''
       ) tarballDrvs + ''
-        cat > "$out/manifest.json" << 'MANIFEST_MARKER'
-      '' + manifest + ''
-        MANIFEST_MARKER
+        
+        # Write manifest.json
+        cat > "$out/manifest.json" <<'EOF'
+${manifest}
+EOF
       ''
     );
 
