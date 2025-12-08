@@ -200,7 +200,7 @@ EOF
       '';
 
       buildCommand = if workspaceName != null then
-        "pnpm -r --filter '${workspaceName}...' ${buildScript}"
+        "pnpm -r --filter '^${workspaceName}' run ${buildScript}"
       else
         "pnpm run ${buildScript}";
 
