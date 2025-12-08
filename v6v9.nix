@@ -317,9 +317,9 @@ EOF
         
         # Install dependencies for the package
         # Note: We don't use -C flag because it prevents pnpm from installing dependencies of link: packages
-        # Instead, we cd into the package directory
+        # Instead, we cd into the package directory and use . as lockfile-dir
         cd "$PKG_DIR"
-        ${pkgs.pnpm}/bin/pnpm install --frozen-lockfile --offline --store-dir "$STORE_DIR" --lockfile-dir "$LOCK_DIR" --config.manage-package-manager-versions=false --force ${if includeDevDependencies then "--prod=false" else ""}
+        ${pkgs.pnpm}/bin/pnpm install --frozen-lockfile --offline --store-dir "$STORE_DIR" --lockfile-dir . --config.manage-package-manager-versions=false --force ${if includeDevDependencies then "--prod=false" else ""}
         cd "$OLDPWD"
 
         # Set up PATH to include node_modules/.bin for build tools from the package directory
