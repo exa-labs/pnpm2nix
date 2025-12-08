@@ -272,9 +272,14 @@ EOF
         STORE_DIR="$TMPDIR/pnpm-store"
         mkdir -p "$STORE_DIR"
         
-        echo "store-dir=$STORE_DIR" >> "$HOME/.npmrc"
+        # Configure pnpm to prevent self-management and network access
+        cat > "$HOME/.npmrc" <<EOF
+store-dir=$STORE_DIR
+manage-package-manager-versions=false
+EOF
 
         # Environment hardening to prevent network access
+        export PNPM_HOME="${pkgs.pnpm}/bin"
         export NPM_CONFIG_OFFLINE=true
         export NPM_CONFIG_AUDIT=false
         export NPM_CONFIG_FUND=false
