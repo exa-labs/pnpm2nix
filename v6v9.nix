@@ -356,7 +356,11 @@ PY
 
         # Remove packageManager field from package.json BEFORE running pnpm commands
         if [ -f package.json ]; then
+          echo "Removing packageManager field from package.json"
+          cat package.json | grep -i packageManager || true
           ${pkgs.jq}/bin/jq 'del(.packageManager)' package.json > package.json.tmp && mv package.json.tmp package.json
+          echo "After removal:"
+          cat package.json | grep -i packageManager || true
         fi
 
         ${pkgs.python3}/bin/python3 patch.py
