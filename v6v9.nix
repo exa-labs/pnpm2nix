@@ -315,6 +315,30 @@ EOF
         # Run pnpm fetch and install with lockfile-dir
         ${pkgs.pnpm}/bin/pnpm fetch --offline --frozen-lockfile --store-dir "$STORE_DIR" --lockfile-dir "$LOCK_DIR" --config.manage-package-manager-versions=false
         
+        # Install dependencies for link: packages first
+        # Parse package.json to find link: dependencies and install their dependencies
+        if [ -f "$PKG_DIR/package.json" ]; then
+          echo "Checking for link: dependencies in $PKG_DIR/package.json"
+          LINK_DEPS=$(${pkgs.jq}/bin/jq -r '
+            (.dependencies // {}) + (.devDependencies // {}) 
+            | to_entries[] 
+            | select(.value | startswith("link:")) 
+            | .value | sub("^link:"; "")
+          ' "$PKG_DIR/package.json" || true)
+          
+          for LINK_PATH in $LINK_DEPS; do
+            LINK_DIR="$PKG_DIR/$LINK_PATH"
+            if [ -d "$LINK_DIR" ] && [ -f "$LINK_DIR/package.json" ]; then
+              echo "Installing dependencies for linked package at $LINK_DIR"
+              if [ -f "$LINK_DIR/pnpm-lock.yaml" ]; then
+                cd "$LINK_DIR"
+                ${pkgs.pnpm}/bin/pnpm install --frozen-lockfile --offline --store-dir "$STORE_DIR" --lockfile-dir . --config.manage-package-manager-versions=false --force ${if includeDevDependencies then "--prod=false" else ""} || echo "Warning: Failed to install dependencies for $LINK_DIR"
+                cd "$OLDPWD"
+              fi
+            fi
+          done
+        fi
+        
         # Install dependencies for the package
         # Note: We don't use -C flag because it prevents pnpm from installing dependencies of link: packages
         # Instead, we cd into the package directory and use . as lockfile-dir
