@@ -265,6 +265,8 @@ EOF
       inherit buildInputs;
 
       buildPhase = ''
+        runHook preBuild
+        
         set -euo pipefail
         
         export HOME=$TMPDIR/home
@@ -369,6 +371,8 @@ PY
         ${pkgs.pnpm}/bin/pnpm install --frozen-lockfile --offline --store-dir "$STORE_DIR" --config.manage-package-manager-versions=false ${if includeDevDependencies then "--prod=false" else ""}
 
         ${if buildScript != null then buildCommand else ""}
+        
+        runHook postBuild
       '';
 
       installPhase = if installPhase != null then installPhase else defaultInstallPhase;
