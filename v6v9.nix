@@ -204,9 +204,14 @@ EOF
       else
         "pnpm run ${buildScript}";
 
-      # Compute lockfile directory and package directory
+      # Compute lockfile directory and package directory relative to src
       lockDir = builtins.dirOf lockFile;
       lockFileName = builtins.baseNameOf lockFile;
+      # Compute relative path from src to lockfile
+      lockFileRelative = if lib.hasPrefix (toString src) (toString lockFile) then
+        lib.removePrefix "${toString src}/" (toString lockFile)
+      else
+        lockFileName;
       
       # Create patch.py as a separate file to avoid heredoc issues
       patchPy = pkgs.writeText "patch.py" ''
@@ -215,7 +220,8 @@ EOF
         import os
         from ruamel.yaml import YAML
 
-        lockfile_path = os.path.join('${lockDir}', '${lockFileName}')
+        # Use the lockfile in the build directory (writable)
+        lockfile_path = '${lockFileRelative}'
         manifest_path = '${pnpmTarballs}/manifest.json'
 
         with open(manifest_path, 'r') as f:
@@ -292,9 +298,10 @@ EOF
         export npm_config_manage_package_manager_versions=false
         ${if includeDevDependencies then "export NPM_CONFIG_PRODUCTION=false" else ""}
 
-        # Set lockfile directory and package directory
-        LOCK_DIR="${lockDir}"
+        # Set package directory and compute lockfile paths
         PKG_DIR="${packagePath}"
+        LOCK_FILE_REL="${lockFileRelative}"
+        LOCK_DIR=$(dirname "$LOCK_FILE_REL")
 
         # Remove packageManager field from package.json in the package directory
         if [ -f "$PKG_DIR/package.json" ]; then
@@ -302,7 +309,7 @@ EOF
           ${pkgs.jq}/bin/jq 'del(.packageManager)' "$PKG_DIR/package.json" > "$PKG_DIR/package.json.tmp" && mv "$PKG_DIR/package.json.tmp" "$PKG_DIR/package.json"
         fi
 
-        # Run the patcher
+        # Run the patcher (lockfile is now in the writable build directory)
         ${pkgs.python3}/bin/python3 ${patchPy}
 
         # Run pnpm fetch and install with lockfile-dir
