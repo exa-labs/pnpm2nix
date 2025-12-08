@@ -388,6 +388,8 @@ PY
       "includeDevDependencies"
       "nativeBuildInputs"
       "buildInputs"
+      "preBuild"
+      "postBuild"
     ]);
 
 in
