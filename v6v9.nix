@@ -284,6 +284,7 @@ EOF
         export NPM_CONFIG_AUDIT=false
         export NPM_CONFIG_FUND=false
         export npm_config_update_notifier=false
+        export npm_config_manage_package_manager_versions=false
         ${if includeDevDependencies then "export NPM_CONFIG_PRODUCTION=false" else ""}
 
         # Create pnpm wrapper to force offline mode for nested installs
