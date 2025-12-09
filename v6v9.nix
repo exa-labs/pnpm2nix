@@ -128,9 +128,74 @@ let
     in
     "https://registry.npmjs.org/${name}/-/${packageName}-${version}.tgz";
 
-  mkPnpmTarballs = { lockFile }:
+  # Discover link: dependencies recursively from package.json
+  discoverLinkDeps = src: packagePath:
     let
-      lock = parsePnpmLock lockFile;
+      packageJsonPath = src + "/${packagePath}/package.json";
+      packageJson = if builtins.pathExists packageJsonPath then
+        builtins.fromJSON (builtins.readFile packageJsonPath)
+      else
+        {};
+      
+      deps = (packageJson.dependencies or {}) // (packageJson.devDependencies or {});
+      
+      linkDeps = builtins.filter (name:
+        let value = deps.${name}; in
+        lib.hasPrefix "link:" value || lib.hasPrefix "file:" value
+      ) (builtins.attrNames deps);
+      
+      resolveLinkPath = name:
+        let
+          value = deps.${name};
+          relativePath = if lib.hasPrefix "link:" value then
+            lib.removePrefix "link:" value
+          else
+            lib.removePrefix "file:" value;
+          # Resolve relative to packagePath
+          resolvedPath = if packagePath == "." then
+            relativePath
+          else
+            "${packagePath}/${relativePath}";
+        in
+        {
+          inherit name;
+          path = resolvedPath;
+          lockFile = src + "/${resolvedPath}/pnpm-lock.yaml";
+        };
+      
+      directLinks = builtins.map resolveLinkPath linkDeps;
+      
+      # Recursively discover transitive link: dependencies
+      recurse = link:
+        let
+          transitive = discoverLinkDeps src link.path;
+        in
+        [ link ] ++ transitive;
+      
+      allLinks = lib.unique (lib.flatten (builtins.map recurse directLinks));
+    in
+    allLinks;
+
+  mkPnpmTarballs = { lockFile, src ? null, packagePath ? "." }:
+    let
+      # Discover all link: dependencies if src is provided
+      linkDeps = if src != null then discoverLinkDeps src packagePath else [];
+      
+      # Collect all lockfiles (main + linked packages)
+      allLockFiles = [ lockFile ] ++ (builtins.map (link: link.lockFile) 
+        (builtins.filter (link: builtins.pathExists link.lockFile) linkDeps));
+      
+      # Parse all lockfiles and merge packages
+      allLocks = builtins.map parsePnpmLock allLockFiles;
+      allPackages = lib.flatten (builtins.map (lock: lock.packages) allLocks);
+      
+      # Deduplicate by key (first occurrence wins)
+      uniquePackages = lib.foldl (acc: pkg:
+        if builtins.any (p: p.key == pkg.key) acc then
+          acc
+        else
+          acc ++ [ pkg ]
+      ) [] allPackages;
 
       tarballDrvs = builtins.map (pkg:
         let
@@ -144,7 +209,7 @@ let
             hash = pkg.integrity;
           };
         }
-      ) lock.packages;
+      ) uniquePackages;
 
       manifest = builtins.toJSON (
         builtins.listToAttrs (
@@ -154,6 +219,12 @@ let
           }) tarballDrvs
         )
       );
+      
+      # Also store the list of link dependencies and their lockfiles for buildPhase
+      linkDepsJson = builtins.toJSON (builtins.map (link: {
+        inherit (link) name path;
+        lockFile = toString link.lockFile;
+      }) linkDeps);
 
     in
     pkgs.runCommand "pnpm-tarballs" {} (
@@ -166,6 +237,11 @@ let
         # Write manifest.json
         cat > "$out/manifest.json" <<'EOF'
 ${manifest}
+EOF
+        
+        # Write link-deps.json for buildPhase
+        cat > "$out/link-deps.json" <<'EOF'
+${linkDepsJson}
 EOF
       ''
     );
@@ -187,7 +263,9 @@ EOF
     ...
   }@args:
     let
-      pnpmTarballs = mkPnpmTarballs { inherit lockFile; };
+      pnpmTarballs = mkPnpmTarballs { 
+        inherit lockFile src packagePath; 
+      };
 
       defaultInstallPhase = ''
         mkdir -p $out
@@ -214,55 +292,79 @@ EOF
         lockFileName;
       
       # Create patch.py as a separate file to avoid heredoc issues
+      # This patcher can handle multiple lockfiles
       patchPy = pkgs.writeText "patch.py" ''
         import json
         import sys
         import os
         from ruamel.yaml import YAML
 
-        # Use the lockfile in the build directory (writable)
-        lockfile_path = '${lockFileRelative}'
         manifest_path = '${pnpmTarballs}/manifest.json'
+        link_deps_path = '${pnpmTarballs}/link-deps.json'
 
         with open(manifest_path, 'r') as f:
             manifest = json.load(f)
+
+        # Load link dependencies info
+        with open(link_deps_path, 'r') as f:
+            link_deps = json.load(f)
 
         yaml = YAML()
         yaml.preserve_quotes = True
         yaml.default_flow_style = False
 
-        with open(lockfile_path, 'r') as f:
-            lockfile = yaml.load(f)
-
-        patches_applied = 0
-        sections_to_patch = []
-
-        if 'packages' in lockfile:
-            sections_to_patch.append(('packages', lockfile['packages']))
-        if 'snapshots' in lockfile:
-            sections_to_patch.append(('snapshots', lockfile['snapshots']))
-
-        for section_name, section in sections_to_patch:
-            for key, tarball_path in manifest.items():
-                if key in section:
-                    entry = section[key]
-                    if isinstance(entry, dict) and 'resolution' in entry:
-                        if isinstance(entry['resolution'], dict):
-                            entry['resolution']['tarball'] = f"file://{tarball_path}"
-                            patches_applied += 1
+        def patch_lockfile(lockfile_path):
+            if not os.path.exists(lockfile_path):
+                print(f"Warning: Lockfile {lockfile_path} does not exist, skipping")
+                return 0
                 
-                if section_name == 'snapshots':
-                    for snapshot_key in section.keys():
-                        normalized_key = snapshot_key.split('(')[0]
-                        if normalized_key == key:
-                            entry = section[snapshot_key]
-                            if isinstance(entry, dict) and 'resolution' in entry:
-                                if isinstance(entry['resolution'], dict):
-                                    entry['resolution']['tarball'] = f"file://{tarball_path}"
-                                    patches_applied += 1
+            with open(lockfile_path, 'r') as f:
+                lockfile = yaml.load(f)
 
-        with open(lockfile_path, 'w') as f:
-            yaml.dump(lockfile, f)
+            patches_applied = 0
+            sections_to_patch = []
+
+            if 'packages' in lockfile:
+                sections_to_patch.append(('packages', lockfile['packages']))
+            if 'snapshots' in lockfile:
+                sections_to_patch.append(('snapshots', lockfile['snapshots']))
+
+            for section_name, section in sections_to_patch:
+                for key, tarball_path in manifest.items():
+                    if key in section:
+                        entry = section[key]
+                        if isinstance(entry, dict) and 'resolution' in entry:
+                            if isinstance(entry['resolution'], dict):
+                                entry['resolution']['tarball'] = f"file://{tarball_path}"
+                                patches_applied += 1
+                    
+                    if section_name == 'snapshots':
+                        for snapshot_key in section.keys():
+                            normalized_key = snapshot_key.split('(')[0]
+                            if normalized_key == key:
+                                entry = section[snapshot_key]
+                                if isinstance(entry, dict) and 'resolution' in entry:
+                                    if isinstance(entry['resolution'], dict):
+                                        entry['resolution']['tarball'] = f"file://{tarball_path}"
+                                        patches_applied += 1
+
+            with open(lockfile_path, 'w') as f:
+                yaml.dump(lockfile, f)
+            
+            return patches_applied
+
+        # Patch main lockfile
+        main_lockfile = '${lockFileRelative}'
+        print(f"Patching main lockfile: {main_lockfile}")
+        patches = patch_lockfile(main_lockfile)
+        print(f"Applied {patches} patches to {main_lockfile}")
+
+        # Patch link dependency lockfiles
+        for link in link_deps:
+            link_lockfile = link['path'] + '/pnpm-lock.yaml'
+            print(f"Patching linked lockfile: {link_lockfile}")
+            patches = patch_lockfile(link_lockfile)
+            print(f"Applied {patches} patches to {link_lockfile}")
       '';
 
     in
@@ -309,32 +411,37 @@ EOF
           ${pkgs.jq}/bin/jq 'del(.packageManager)' "$PKG_DIR/package.json" > "$PKG_DIR/package.json.tmp" && mv "$PKG_DIR/package.json.tmp" "$PKG_DIR/package.json"
         fi
 
-        # Run the patcher (lockfile is now in the writable build directory)
+        # Run the patcher (patches all lockfiles: main + linked packages)
         ${pkgs.python3}/bin/python3 ${patchPy}
 
-        # Run pnpm fetch and install with lockfile-dir
+        # Run pnpm fetch for main lockfile
+        echo "Fetching dependencies for main lockfile: $LOCK_DIR"
         ${pkgs.pnpm}/bin/pnpm fetch --offline --frozen-lockfile --store-dir "$STORE_DIR" --lockfile-dir "$LOCK_DIR" --config.manage-package-manager-versions=false
         
-        # Install dependencies for link: packages first
-        # Parse package.json to find link: dependencies and install their dependencies
-        if [ -f "$PKG_DIR/package.json" ]; then
-          echo "Checking for link: dependencies in $PKG_DIR/package.json"
-          LINK_DEPS=$(${pkgs.jq}/bin/jq -r '
-            (.dependencies // {}) + (.devDependencies // {}) 
-            | to_entries[] 
-            | select(.value | startswith("link:")) 
-            | .value | sub("^link:"; "")
-          ' "$PKG_DIR/package.json" || true)
-          
-          for LINK_PATH in $LINK_DEPS; do
-            LINK_DIR="$PKG_DIR/$LINK_PATH"
-            if [ -d "$LINK_DIR" ] && [ -f "$LINK_DIR/package.json" ]; then
-              echo "Installing dependencies for linked package at $LINK_DIR"
-              if [ -f "$LINK_DIR/pnpm-lock.yaml" ]; then
-                cd "$LINK_DIR"
-                ${pkgs.pnpm}/bin/pnpm install --frozen-lockfile --offline --store-dir "$STORE_DIR" --lockfile-dir . --config.manage-package-manager-versions=false --force ${if includeDevDependencies then "--prod=false" else ""} || echo "Warning: Failed to install dependencies for $LINK_DIR"
-                cd "$OLDPWD"
-              fi
+        # Run pnpm fetch for each linked package's lockfile
+        if [ -f "${pnpmTarballs}/link-deps.json" ]; then
+          ${pkgs.jq}/bin/jq -c '.[]' "${pnpmTarballs}/link-deps.json" | while read -r link; do
+            LINK_PATH=$(echo "$link" | ${pkgs.jq}/bin/jq -r '.path')
+            LINK_NAME=$(echo "$link" | ${pkgs.jq}/bin/jq -r '.name')
+            
+            if [ -f "$LINK_PATH/pnpm-lock.yaml" ]; then
+              echo "Fetching dependencies for linked package $LINK_NAME at $LINK_PATH"
+              ${pkgs.pnpm}/bin/pnpm fetch --offline --frozen-lockfile --store-dir "$STORE_DIR" --lockfile-dir "$LINK_PATH" --config.manage-package-manager-versions=false || echo "Warning: Failed to fetch for $LINK_PATH"
+            fi
+          done
+        fi
+        
+        # Install dependencies for each linked package
+        if [ -f "${pnpmTarballs}/link-deps.json" ]; then
+          ${pkgs.jq}/bin/jq -c '.[]' "${pnpmTarballs}/link-deps.json" | while read -r link; do
+            LINK_PATH=$(echo "$link" | ${pkgs.jq}/bin/jq -r '.path')
+            LINK_NAME=$(echo "$link" | ${pkgs.jq}/bin/jq -r '.name')
+            
+            if [ -f "$LINK_PATH/pnpm-lock.yaml" ]; then
+              echo "Installing dependencies for linked package $LINK_NAME at $LINK_PATH"
+              cd "$LINK_PATH"
+              ${pkgs.pnpm}/bin/pnpm install --frozen-lockfile --offline --store-dir "$STORE_DIR" --lockfile-dir . --config.manage-package-manager-versions=false --force ${if includeDevDependencies then "--prod=false" else ""} || echo "Warning: Failed to install for $LINK_PATH"
+              cd "$OLDPWD"
             fi
           done
         fi
