@@ -128,23 +128,47 @@ let
     in
     "https://registry.npmjs.org/${name}/-/${packageName}-${version}.tgz";
 
+  # Canonicalize a path by resolving ".." and "." segments
+  canonicalizePath = path:
+    let
+      # Split path into segments
+      segments = lib.splitString "/" path;
+      
+      # Fold over segments to resolve ".." and remove "."
+      canonicalize = acc: segment:
+        if segment == "." || segment == "" then
+          acc  # Skip "." and empty segments
+        else if segment == ".." then
+          # Go up one level by removing last segment
+          if builtins.length acc > 0 then
+            lib.init acc
+          else
+            acc  # Can't go above root
+        else
+          acc ++ [ segment ];  # Add normal segment
+      
+      canonicalSegments = builtins.foldl' canonicalize [] segments;
+      canonicalPath = lib.concatStringsSep "/" canonicalSegments;
+    in
+    if canonicalPath == "" then "." else canonicalPath;
+
   # Discover link: dependencies recursively from package.json with cycle detection
   discoverLinkDeps = src: packagePath:
     let
       # Internal helper that tracks visited paths to prevent infinite recursion
       discoverLinkDepsWithVisited = visited: currentPath:
         let
-          # Normalize path by removing leading "./" and trailing "/"
-          normalizedPath = lib.removeSuffix "/" (lib.removePrefix "./" currentPath);
+          # Canonicalize path to handle ".." and "." segments
+          canonicalPath = canonicalizePath currentPath;
           
           # Check if we've already visited this path
-          alreadyVisited = builtins.elem normalizedPath visited;
+          alreadyVisited = builtins.elem canonicalPath visited;
         in
         if alreadyVisited then
           []  # Return empty list to break the cycle
         else
           let
-            packageJsonPath = src + "/${normalizedPath}/package.json";
+            packageJsonPath = src + "/${canonicalPath}/package.json";
             packageJson = if builtins.pathExists packageJsonPath then
               builtins.fromJSON (builtins.readFile packageJsonPath)
             else
@@ -165,10 +189,10 @@ let
                 else
                   lib.removePrefix "file:" value;
                 # Resolve relative to currentPath
-                resolvedPath = if normalizedPath == "." then
+                resolvedPath = if canonicalPath == "." then
                   relativePath
                 else
-                  "${normalizedPath}/${relativePath}";
+                  "${canonicalPath}/${relativePath}";
               in
               {
                 inherit name;
@@ -179,7 +203,7 @@ let
             directLinks = builtins.map resolveLinkPath linkDeps;
             
             # Add current path to visited set
-            newVisited = visited ++ [ normalizedPath ];
+            newVisited = visited ++ [ canonicalPath ];
             
             # Recursively discover transitive link: dependencies
             recurse = link:
