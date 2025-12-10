@@ -439,6 +439,7 @@ EOF
         mkdir -p "$STORE_DIR"
         
         # Configure pnpm via environment variables (no .npmrc file needed)
+        export CI=true  # Tell pnpm we're in CI mode to avoid TTY issues
         export PNPM_STORE_DIR="$STORE_DIR"
         export PNPM_HOME="${pkgs.pnpm}/bin"
         export NPM_CONFIG_OFFLINE=true
