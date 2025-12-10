@@ -181,9 +181,15 @@ let
       # Discover all link: dependencies if src is provided
       linkDeps = if src != null then discoverLinkDeps src packagePath else [];
       
-      # Collect all lockfiles (main + linked packages)
-      allLockFiles = [ lockFile ] ++ (builtins.map (link: link.lockFile) 
-        (builtins.filter (link: builtins.pathExists link.lockFile) linkDeps));
+      # Check if there's a lockfile at the src root (monorepo root)
+      srcRootLockFile = if src != null then src + "/pnpm-lock.yaml" else null;
+      hasSrcRootLockFile = srcRootLockFile != null && builtins.pathExists srcRootLockFile;
+      
+      # Collect all lockfiles (main + src root + linked packages)
+      allLockFiles = [ lockFile ] 
+        ++ (if hasSrcRootLockFile && srcRootLockFile != lockFile then [ srcRootLockFile ] else [])
+        ++ (builtins.map (link: link.lockFile) 
+          (builtins.filter (link: builtins.pathExists link.lockFile) linkDeps));
       
       # Parse all lockfiles and merge packages
       allLocks = builtins.map parsePnpmLock allLockFiles;
