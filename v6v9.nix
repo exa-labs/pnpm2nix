@@ -128,53 +128,71 @@ let
     in
     "https://registry.npmjs.org/${name}/-/${packageName}-${version}.tgz";
 
-  # Discover link: dependencies recursively from package.json
+  # Discover link: dependencies recursively from package.json with cycle detection
   discoverLinkDeps = src: packagePath:
     let
-      packageJsonPath = src + "/${packagePath}/package.json";
-      packageJson = if builtins.pathExists packageJsonPath then
-        builtins.fromJSON (builtins.readFile packageJsonPath)
-      else
-        {};
-      
-      deps = (packageJson.dependencies or {}) // (packageJson.devDependencies or {});
-      
-      linkDeps = builtins.filter (name:
-        let value = deps.${name}; in
-        lib.hasPrefix "link:" value || lib.hasPrefix "file:" value
-      ) (builtins.attrNames deps);
-      
-      resolveLinkPath = name:
+      # Internal helper that tracks visited paths to prevent infinite recursion
+      discoverLinkDepsWithVisited = visited: currentPath:
         let
-          value = deps.${name};
-          relativePath = if lib.hasPrefix "link:" value then
-            lib.removePrefix "link:" value
-          else
-            lib.removePrefix "file:" value;
-          # Resolve relative to packagePath
-          resolvedPath = if packagePath == "." then
-            relativePath
-          else
-            "${packagePath}/${relativePath}";
+          # Normalize path by removing leading "./" and trailing "/"
+          normalizedPath = lib.removeSuffix "/" (lib.removePrefix "./" currentPath);
+          
+          # Check if we've already visited this path
+          alreadyVisited = builtins.elem normalizedPath visited;
         in
-        {
-          inherit name;
-          path = resolvedPath;
-          lockFile = src + "/${resolvedPath}/pnpm-lock.yaml";
-        };
-      
-      directLinks = builtins.map resolveLinkPath linkDeps;
-      
-      # Recursively discover transitive link: dependencies
-      recurse = link:
-        let
-          transitive = discoverLinkDeps src link.path;
-        in
-        [ link ] ++ transitive;
-      
-      allLinks = lib.unique (lib.flatten (builtins.map recurse directLinks));
+        if alreadyVisited then
+          []  # Return empty list to break the cycle
+        else
+          let
+            packageJsonPath = src + "/${normalizedPath}/package.json";
+            packageJson = if builtins.pathExists packageJsonPath then
+              builtins.fromJSON (builtins.readFile packageJsonPath)
+            else
+              {};
+            
+            deps = (packageJson.dependencies or {}) // (packageJson.devDependencies or {});
+            
+            linkDeps = builtins.filter (name:
+              let value = deps.${name}; in
+              lib.hasPrefix "link:" value || lib.hasPrefix "file:" value
+            ) (builtins.attrNames deps);
+            
+            resolveLinkPath = name:
+              let
+                value = deps.${name};
+                relativePath = if lib.hasPrefix "link:" value then
+                  lib.removePrefix "link:" value
+                else
+                  lib.removePrefix "file:" value;
+                # Resolve relative to currentPath
+                resolvedPath = if normalizedPath == "." then
+                  relativePath
+                else
+                  "${normalizedPath}/${relativePath}";
+              in
+              {
+                inherit name;
+                path = resolvedPath;
+                lockFile = src + "/${resolvedPath}/pnpm-lock.yaml";
+              };
+            
+            directLinks = builtins.map resolveLinkPath linkDeps;
+            
+            # Add current path to visited set
+            newVisited = visited ++ [ normalizedPath ];
+            
+            # Recursively discover transitive link: dependencies
+            recurse = link:
+              let
+                transitive = discoverLinkDepsWithVisited newVisited link.path;
+              in
+              [ link ] ++ transitive;
+            
+            allLinks = lib.unique (lib.flatten (builtins.map recurse directLinks));
+          in
+          allLinks;
     in
-    allLinks;
+    discoverLinkDepsWithVisited [] packagePath;
 
   mkPnpmTarballs = { lockFile, src ? null, packagePath ? "." }:
     let
