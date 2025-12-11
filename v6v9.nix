@@ -405,8 +405,9 @@ EOF
         jq
       ];
       
-      # Disable noBrokenSymlinks check since we fix link: dependencies manually
-      dontCheckBrokenSymlinks = true;
+      # Skip fixupPhase which includes noBrokenSymlinks check
+      # We handle link: dependencies manually in buildPhase
+      dontFixup = true;
 
       buildPhase = ''
         set -euo pipefail
