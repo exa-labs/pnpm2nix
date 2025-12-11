@@ -508,7 +508,7 @@ EOF
         ${preBuild}
 
         ${if buildScript != null then 
-          "cd \"$PKG_DIR\" && " + buildCommand
+          "cd \"$PKG_DIR\" && " + buildCommand + " && cd \"$OLDPWD\""
         else 
           ""
         }
