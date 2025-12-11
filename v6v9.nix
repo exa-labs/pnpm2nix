@@ -558,6 +558,12 @@ EOF
         set -euo pipefail
         set -x
         
+        # Remove packageManager field from package.json to prevent pnpm from trying to install itself
+        if [ -f "package.json" ]; then
+          echo "Removing packageManager field from package.json"
+          ${pkgs.jq}/bin/jq 'del(.packageManager)' package.json > package.json.tmp && mv package.json.tmp package.json
+        fi
+        
         if [ -d "${nodeModulesDrv}/node_modules" ]; then
           cp -r "${nodeModulesDrv}/node_modules" ./
         fi
