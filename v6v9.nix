@@ -294,53 +294,34 @@ EOF
       ''
     );
 
-  mkPnpmPackageV6V9 = {
+  # New function: mkPnpmNodeModules - returns just node_modules derivation
+  mkPnpmNodeModules = {
     src,
-    pname,
-    version ? "1.0.0",
-    lockFile ? "${src}/pnpm-lock.yaml",
-    workspaceName ? null,
-    packagePath ? ".",
-    buildScript ? "build",
-    installPhase ? null,
+    lockFile,
+    importer ? ".",
+    packagePath ? null,  # deprecated, use importer
     includeDevDependencies ? true,
-    nativeBuildInputs ? [],
-    buildInputs ? [],
-    preBuild ? "",
-    postBuild ? "",
+    installLinkDeps ? true,
     ...
   }@args:
     let
+      # Use importer if provided, otherwise fall back to packagePath for backward compat
+      effectiveImporter = if packagePath != null then packagePath else importer;
+      
       pnpmTarballs = mkPnpmTarballs { 
-        inherit lockFile src packagePath; 
+        inherit lockFile src;
+        packagePath = effectiveImporter;
       };
 
-      defaultInstallPhase = ''
-        mkdir -p $out
-        if [ -d "${packagePath}/dist" ]; then
-          cp -r ${packagePath}/dist $out/
-        fi
-        if [ -f "${packagePath}/package.json" ]; then
-          cp ${packagePath}/package.json $out/
-        fi
-      '';
-
-      buildCommand = if workspaceName != null then
-        "pnpm -r --filter '^${workspaceName}' run ${buildScript}"
-      else
-        "pnpm run ${buildScript}";
-
-      # Compute lockfile directory and package directory relative to src
+      # Compute lockfile directory relative to src
       lockDir = builtins.dirOf lockFile;
       lockFileName = builtins.baseNameOf lockFile;
-      # Compute relative path from src to lockfile
       lockFileRelative = if lib.hasPrefix (toString src) (toString lockFile) then
         lib.removePrefix "${toString src}/" (toString lockFile)
       else
         lockFileName;
       
-      # Create patch.py as a separate file to avoid heredoc issues
-      # This patcher can handle multiple lockfiles
+      # Reuse the same patch.py logic from original mkPnpmPackageV6V9
       patchPy = pkgs.writeText "patch.py" ''
         import json
         import sys
@@ -353,7 +334,6 @@ EOF
         with open(manifest_path, 'r') as f:
             manifest = json.load(f)
 
-        # Load link dependencies info
         with open(link_deps_path, 'r') as f:
             link_deps = json.load(f)
 
@@ -401,13 +381,11 @@ EOF
             
             return patches_applied
 
-        # Patch main lockfile
         main_lockfile = '${lockFileRelative}'
         print(f"Patching main lockfile: {main_lockfile}")
         patches = patch_lockfile(main_lockfile)
         print(f"Applied {patches} patches to {main_lockfile}")
 
-        # Patch link dependency lockfiles
         for link in link_deps:
             link_lockfile = link['path'] + '/pnpm-lock.yaml'
             print(f"Patching linked lockfile: {link_lockfile}")
@@ -416,21 +394,20 @@ EOF
       '';
 
     in
-    pkgs.stdenvNoCC.mkDerivation ({
-      inherit pname version src;
+    pkgs.stdenvNoCC.mkDerivation {
+      name = "pnpm-node-modules-${builtins.replaceStrings ["/"] ["-"] effectiveImporter}";
+      inherit src;
 
       nativeBuildInputs = with pkgs; [
         nodejs
         pnpm
         python3Packages.ruamel-yaml
         jq
-      ] ++ nativeBuildInputs;
-
-      inherit buildInputs;
+      ];
 
       buildPhase = ''
         set -euo pipefail
-        set -x  # Enable command tracing for debugging
+        set -x
         
         export HOME=$TMPDIR/home
         mkdir -p "$HOME"
@@ -438,8 +415,7 @@ EOF
         STORE_DIR="$TMPDIR/pnpm-store"
         mkdir -p "$STORE_DIR"
         
-        # Configure pnpm via environment variables (no .npmrc file needed)
-        export CI=true  # Tell pnpm we're in CI mode to avoid TTY issues
+        export CI=true
         export PNPM_STORE_DIR="$STORE_DIR"
         export PNPM_HOME="${pkgs.pnpm}/bin"
         export NPM_CONFIG_OFFLINE=true
@@ -449,25 +425,21 @@ EOF
         export npm_config_manage_package_manager_versions=false
         ${if includeDevDependencies then "export NPM_CONFIG_PRODUCTION=false" else ""}
 
-        # Set package directory and compute lockfile paths
-        PKG_DIR="${packagePath}"
+        PKG_DIR="${effectiveImporter}"
         LOCK_FILE_REL="${lockFileRelative}"
         LOCK_DIR=$(dirname "$LOCK_FILE_REL")
 
-        # Remove packageManager field from package.json in the package directory
         if [ -f "$PKG_DIR/package.json" ]; then
           echo "Removing packageManager field from $PKG_DIR/package.json"
           ${pkgs.jq}/bin/jq 'del(.packageManager)' "$PKG_DIR/package.json" > "$PKG_DIR/package.json.tmp" && mv "$PKG_DIR/package.json.tmp" "$PKG_DIR/package.json"
         fi
 
-        # Run the patcher (patches all lockfiles: main + linked packages)
         ${pkgs.python3}/bin/python3 ${patchPy}
 
-        # Run pnpm fetch for main lockfile
         echo "Fetching dependencies for main lockfile: $LOCK_DIR"
         ${pkgs.pnpm}/bin/pnpm fetch --offline --frozen-lockfile --store-dir "$STORE_DIR" --lockfile-dir "$LOCK_DIR" --config.manage-package-manager-versions=false
         
-        # Run pnpm fetch for each linked package's lockfile
+        ${if installLinkDeps then ''
         if [ -f "${pnpmTarballs}/link-deps.json" ]; then
           ${pkgs.jq}/bin/jq -c '.[]' "${pnpmTarballs}/link-deps.json" | while read -r link; do
             LINK_PATH=$(echo "$link" | ${pkgs.jq}/bin/jq -r '.path')
@@ -480,7 +452,6 @@ EOF
           done
         fi
         
-        # Install dependencies for each linked package
         if [ -f "${pnpmTarballs}/link-deps.json" ]; then
           ${pkgs.jq}/bin/jq -c '.[]' "${pnpmTarballs}/link-deps.json" | while read -r link; do
             LINK_PATH=$(echo "$link" | ${pkgs.jq}/bin/jq -r '.path')
@@ -494,24 +465,88 @@ EOF
             fi
           done
         fi
+        '' else ""}
         
-        # Install dependencies for the package
-        # Note: We don't use -C flag because it prevents pnpm from installing dependencies of link: packages
-        # Instead, we cd into the package directory and use . as lockfile-dir
         cd "$PKG_DIR"
         ${pkgs.pnpm}/bin/pnpm install --frozen-lockfile --offline --store-dir "$STORE_DIR" --lockfile-dir . --config.manage-package-manager-versions=false --force ${if includeDevDependencies then "--prod=false" else ""}
         cd "$OLDPWD"
+      '';
 
-        # Set up PATH to include node_modules/.bin for build tools from the package directory
-        export PATH="$PWD/$PKG_DIR/node_modules/.bin:$PATH"
+      installPhase = ''
+        mkdir -p $out
+        
+        if [ -d "${effectiveImporter}/node_modules" ]; then
+          cp -r "${effectiveImporter}/node_modules" $out/
+        fi
+        
+        cp ${pnpmTarballs}/manifest.json $out/
+        cp ${pnpmTarballs}/link-deps.json $out/
+      '';
+    };
+
+  # New function: mkNodePackage - wrapper that uses node_modules + runs build
+  mkNodePackage = {
+    src,
+    nodeModulesDrv,
+    pname,
+    version ? "1.0.0",
+    buildScript ? "build",
+    workspaceName ? null,
+    installPhase ? null,
+    linkWorkspace ? {},
+    nativeBuildInputs ? [],
+    buildInputs ? [],
+    preBuild ? "",
+    postBuild ? "",
+    ...
+  }@args:
+    let
+      defaultInstallPhase = ''
+        mkdir -p $out
+        if [ -d "dist" ]; then
+          cp -r dist $out/
+        fi
+        if [ -f "package.json" ]; then
+          cp package.json $out/
+        fi
+      '';
+
+      buildCommand = if workspaceName != null then
+        "pnpm -r --filter '^${workspaceName}' run ${buildScript}"
+      else
+        "pnpm run ${buildScript}";
+
+    in
+    pkgs.stdenvNoCC.mkDerivation ({
+      inherit pname version src;
+
+      nativeBuildInputs = with pkgs; [
+        nodejs
+        pnpm
+      ] ++ nativeBuildInputs;
+
+      inherit buildInputs;
+
+      buildPhase = ''
+        set -euo pipefail
+        set -x
+        
+        if [ -d "${nodeModulesDrv}/node_modules" ]; then
+          cp -r "${nodeModulesDrv}/node_modules" ./
+        fi
+        
+        ${lib.concatStringsSep "\n" (lib.mapAttrsToList (name: output: ''
+          if [ -L "node_modules/${name}" ] || [ -d "node_modules/${name}" ]; then
+            rm -rf "node_modules/${name}"
+            ln -s "${output}" "node_modules/${name}"
+          fi
+        '') linkWorkspace)}
+        
+        export PATH="$PWD/node_modules/.bin:$PATH"
 
         ${preBuild}
 
-        ${if buildScript != null then 
-          "cd \"$PKG_DIR\" && " + buildCommand + " && cd \"$OLDPWD\""
-        else 
-          ""
-        }
+        ${if buildScript != null then buildCommand else ""}
         
         ${postBuild}
       '';
@@ -519,11 +554,55 @@ EOF
       installPhase = if installPhase != null then installPhase else defaultInstallPhase;
     } // builtins.removeAttrs args [
       "src"
+      "nodeModulesDrv"
+      "pname"
+      "version"
+      "buildScript"
+      "workspaceName"
+      "installPhase"
+      "linkWorkspace"
+      "nativeBuildInputs"
+      "buildInputs"
+      "preBuild"
+      "postBuild"
+    ]);
+
+  # Backward compatibility wrapper
+  mkPnpmPackageV6V9 = {
+    src,
+    pname,
+    version ? "1.0.0",
+    lockFile ? "${src}/pnpm-lock.yaml",
+    workspaceName ? null,
+    packagePath ? ".",
+    importer ? null,
+    buildScript ? "build",
+    installPhase ? null,
+    includeDevDependencies ? true,
+    nativeBuildInputs ? [],
+    buildInputs ? [],
+    preBuild ? "",
+    postBuild ? "",
+    ...
+  }@args:
+    let
+      effectiveImporter = if importer != null then importer else packagePath;
+      
+      nodeModulesDrv = mkPnpmNodeModules {
+        inherit src lockFile includeDevDependencies;
+        importer = effectiveImporter;
+      };
+    in
+    mkNodePackage ({
+      inherit src nodeModulesDrv pname version buildScript workspaceName installPhase nativeBuildInputs buildInputs preBuild postBuild;
+    } // builtins.removeAttrs args [
+      "src"
       "pname"
       "version"
       "lockFile"
       "workspaceName"
       "packagePath"
+      "importer"
       "buildScript"
       "installPhase"
       "includeDevDependencies"
@@ -535,5 +614,5 @@ EOF
 
 in
 {
-  inherit mkPnpmTarballs mkPnpmPackageV6V9 parsePnpmLock parsePackageKey makeTarballUrl;
+  inherit mkPnpmTarballs mkPnpmNodeModules mkNodePackage mkPnpmPackageV6V9 parsePnpmLock parsePackageKey makeTarballUrl;
 }
