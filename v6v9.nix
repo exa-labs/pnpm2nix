@@ -566,6 +566,8 @@ EOF
         
         if [ -d "${nodeModulesDrv}/node_modules" ]; then
           cp -r "${nodeModulesDrv}/node_modules" ./
+          # Make node_modules writable so we can modify it
+          chmod -R u+w node_modules
         fi
         
         ${lib.concatStringsSep "\n" (lib.mapAttrsToList (name: output: ''
