@@ -404,6 +404,9 @@ EOF
         python3Packages.ruamel-yaml
         jq
       ];
+      
+      # Disable noBrokenSymlinks check since we fix link: dependencies manually
+      dontCheckBrokenSymlinks = true;
 
       buildPhase = ''
         set -euo pipefail
