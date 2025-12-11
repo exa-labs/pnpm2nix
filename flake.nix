@@ -18,7 +18,7 @@
           pnpm2nixV6V9 = import ./v6v9.nix { inherit pkgs; };
         in {
           inherit (pnpm2nixV5) mkPnpmPackage mkPnpmEnv defaultPnpmOverrides;
-          inherit (pnpm2nixV6V9) mkPnpmTarballs mkPnpmPackageV6V9;
+          inherit (pnpm2nixV6V9) mkPnpmTarballs mkPnpmNodeModules mkNodePackage mkPnpmPackageV6V9;
           mkPnpmPackageAuto = args:
             let
               lockFile = args.pnpmLock or (args.src + "/pnpm-lock.yaml");
