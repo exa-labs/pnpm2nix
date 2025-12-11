@@ -470,6 +470,29 @@ EOF
         cd "$PKG_DIR"
         ${pkgs.pnpm}/bin/pnpm install --frozen-lockfile --offline --store-dir "$STORE_DIR" --lockfile-dir . --config.manage-package-manager-versions=false --force ${if includeDevDependencies then "--prod=false" else ""}
         cd "$OLDPWD"
+        
+        ${if installLinkDeps then ''
+        # Post-install fixup: rewrite link: dependencies to point to valid Nix store paths
+        if [ -f "${pnpmTarballs}/link-deps.json" ]; then
+          echo "Fixing link: dependencies to point to valid Nix store paths"
+          ${pkgs.jq}/bin/jq -c '.[]' "${pnpmTarballs}/link-deps.json" | while read -r link; do
+            LINK_PATH=$(echo "$link" | ${pkgs.jq}/bin/jq -r '.path')
+            LINK_NAME=$(echo "$link" | ${pkgs.jq}/bin/jq -r '.name')
+            
+            # Compute absolute path to the linked package in the Nix store
+            ABS_PATH=$(${pkgs.coreutils}/bin/realpath -m "$LINK_PATH")
+            DEST="$PKG_DIR/node_modules/$LINK_NAME"
+            
+            if [ -e "$ABS_PATH" ]; then
+              echo "Fixing link: $LINK_NAME -> $ABS_PATH"
+              rm -rf "$DEST"
+              ln -s "$ABS_PATH" "$DEST"
+            else
+              echo "Warning: Link target $ABS_PATH does not exist for $LINK_NAME"
+            fi
+          done
+        fi
+        '' else ""}
       '';
 
       installPhase = ''
