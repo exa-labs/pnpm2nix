@@ -152,7 +152,62 @@ let
     in
     if canonicalPath == "" then "." else canonicalPath;
 
+  # Parse link: dependencies from pnpm-lock.yaml (uv2nix-style: lockfile is source of truth)
+  parseLinkDepsFromLock = lockFile:
+    let
+      text = builtins.readFile lockFile;
+      lines = lib.splitString "\n" text;
+      
+      # Find importers section
+      findImportersStart = lines:
+        let
+          indices = lib.imap0 (i: line:
+            if builtins.match "^importers:[[:space:]]*$" line != null then i else null
+          ) lines;
+          filtered = builtins.filter (x: x != null) indices;
+        in
+        if builtins.length filtered > 0 then builtins.elemAt filtered 0 else null;
+      
+      importersStart = findImportersStart lines;
+      
+      # Parse dependencies looking for link: or file: versions
+      parseDeps = lines:
+        let
+          processLine = state: line:
+            let
+              # Match version: link:../path or version: file:../path
+              linkMatch = builtins.match "^[[:space:]]+version: (link:|file:)(.+)$" line;
+              # Match dependency name (indented with specifier on next line)
+              nameMatch = builtins.match "^[[:space:]]+([^:[:space:]]+):$" line;
+            in
+            if nameMatch != null then
+              state // { currentName = builtins.elemAt nameMatch 0; }
+            else if linkMatch != null && state.currentName != null then
+              let
+                prefix = builtins.elemAt linkMatch 0;
+                path = builtins.elemAt linkMatch 1;
+              in
+              {
+                currentName = null;
+                deps = state.deps ++ [{
+                  name = state.currentName;
+                  relativePath = path;
+                }];
+              }
+            else
+              state;
+          
+          initialState = { currentName = null; deps = []; };
+          finalState = lib.foldl processLine initialState lines;
+        in
+        finalState.deps;
+      
+      deps = if importersStart != null then parseDeps lines else [];
+    in
+    deps;
+
   # Discover link: dependencies recursively from package.json with cycle detection
+  # (kept for backward compatibility, but new code should use parseLinkDepsFromLock)
   discoverLinkDeps = src: packagePath:
     let
       # Internal helper that tracks visited paths to prevent infinite recursion
@@ -218,20 +273,24 @@ let
     in
     discoverLinkDepsWithVisited [] packagePath;
 
-  mkPnpmTarballs = { lockFile, src ? null, packagePath ? "." }:
+  mkPnpmTarballs = { lockFile, src ? null, packagePath ? ".", linkDepsOverride ? null }:
     let
-      # Discover all link: dependencies if src is provided
-      linkDeps = if src != null then discoverLinkDeps src packagePath else [];
+      # Use override if provided (holy mode), otherwise discover from src (legacy mode)
+      linkDeps = if linkDepsOverride != null then
+        linkDepsOverride
+      else if src != null then 
+        discoverLinkDeps src packagePath 
+      else 
+        [];
       
-      # Check if there's a lockfile at the src root (monorepo root)
+      # Check if there's a lockfile at the src root (monorepo root) - only in legacy mode
       srcRootLockFile = if src != null then src + "/pnpm-lock.yaml" else null;
       hasSrcRootLockFile = srcRootLockFile != null && builtins.pathExists srcRootLockFile;
       
       # Collect all lockfiles (main + src root + linked packages)
       allLockFiles = [ lockFile ] 
         ++ (if hasSrcRootLockFile && srcRootLockFile != lockFile then [ srcRootLockFile ] else [])
-        ++ (builtins.map (link: link.lockFile) 
-          (builtins.filter (link: builtins.pathExists link.lockFile) linkDeps));
+        ++ (builtins.filter (lf: lf != null) (builtins.map (link: link.lockFile) linkDeps));
       
       # Parse all lockfiles and merge packages
       allLocks = builtins.map parsePnpmLock allLockFiles;
@@ -295,6 +354,7 @@ EOF
     );
 
   # New function: mkPnpmNodeModules - returns just node_modules derivation
+  # "Holy" mode: src is the package root, link deps are derived from lockfile
   mkPnpmNodeModules = {
     src,
     lockFile,
@@ -302,15 +362,52 @@ EOF
     packagePath ? null,  # deprecated, use importer
     includeDevDependencies ? true,
     installLinkDeps ? true,
+    # Legacy mode: if true, use old workspace-root-based discovery
+    # If false (default for new code), use lockfile-based discovery with precise src
+    legacyWorkspaceMode ? false,
     ...
   }@args:
     let
       # Use importer if provided, otherwise fall back to packagePath for backward compat
       effectiveImporter = if packagePath != null then packagePath else importer;
       
+      # Parse link deps from lockfile (uv2nix-style)
+      lockfileLinkDeps = parseLinkDepsFromLock lockFile;
+      
+      # Compute Nix paths for each link dep (this makes them inputs to the derivation)
+      # Each path is relative to src (the package root)
+      linkDepPaths = builtins.listToAttrs (builtins.map (dep: {
+        name = dep.name;
+        value = {
+          relativePath = dep.relativePath;
+          # This creates a Nix path input - Nix will include it in the sandbox
+          nixPath = src + "/${dep.relativePath}";
+          # Check if the linked package has its own lockfile
+          lockFile = let p = src + "/${dep.relativePath}/pnpm-lock.yaml"; in
+            if builtins.pathExists p then p else null;
+        };
+      }) lockfileLinkDeps);
+      
+      # For legacy mode, use the old discovery method
+      legacyLinkDeps = if legacyWorkspaceMode then discoverLinkDeps src effectiveImporter else [];
+      
+      # Build link deps list for mkPnpmTarballs
+      linkDepsForTarballs = if legacyWorkspaceMode then
+        legacyLinkDeps
+      else
+        builtins.map (dep: {
+          name = dep.name;
+          path = dep.relativePath;
+          lockFile = linkDepPaths.${dep.name}.lockFile;
+        }) lockfileLinkDeps;
+      
       pnpmTarballs = mkPnpmTarballs { 
-        inherit lockFile src;
+        inherit lockFile;
+        # In holy mode, we don't pass src to mkPnpmTarballs for discovery
+        # Instead, we pass the pre-computed link deps
+        src = if legacyWorkspaceMode then src else null;
         packagePath = effectiveImporter;
+        linkDepsOverride = if legacyWorkspaceMode then null else linkDepsForTarballs;
       };
 
       # Compute lockfile directory relative to src
@@ -393,6 +490,12 @@ EOF
             print(f"Applied {patches} patches to {link_lockfile}")
       '';
 
+      # JSON of link dep paths for holy mode buildPhase
+      linkDepPathsJson = builtins.toJSON (lib.mapAttrs (name: info: {
+        relativePath = info.relativePath;
+        nixPath = toString info.nixPath;
+      }) linkDepPaths);
+
     in
     pkgs.stdenvNoCC.mkDerivation {
       name = "pnpm-node-modules-${builtins.replaceStrings ["/"] ["-"] effectiveImporter}";
@@ -408,6 +511,10 @@ EOF
       # Skip fixupPhase which includes noBrokenSymlinks check
       # We handle link: dependencies manually in buildPhase
       dontFixup = true;
+      
+      # In holy mode, pass the link dep Nix paths as derivation inputs
+      # This ensures Nix includes them in the sandbox
+      linkDepSrcs = if legacyWorkspaceMode then {} else linkDepPaths;
 
       buildPhase = ''
         set -euo pipefail
@@ -432,6 +539,21 @@ EOF
         PKG_DIR="${effectiveImporter}"
         LOCK_FILE_REL="${lockFileRelative}"
         LOCK_DIR=$(dirname "$LOCK_FILE_REL")
+
+        ${if !legacyWorkspaceMode && builtins.length lockfileLinkDeps > 0 then ''
+        # Holy mode: create symlinks from expected relative paths to Nix store paths
+        echo "Setting up link: dependencies (holy mode)"
+        ${lib.concatStringsSep "\n" (lib.mapAttrsToList (name: info: ''
+          LINK_REL_PATH="${info.relativePath}"
+          LINK_NIX_PATH="${info.nixPath}"
+          echo "Creating symlink: $LINK_REL_PATH -> $LINK_NIX_PATH"
+          mkdir -p "$(dirname "$LINK_REL_PATH")"
+          if [ -e "$LINK_REL_PATH" ]; then
+            rm -rf "$LINK_REL_PATH"
+          fi
+          ln -s "$LINK_NIX_PATH" "$LINK_REL_PATH"
+        '') linkDepPaths)}
+        '' else ""}
 
         if [ -f "$PKG_DIR/package.json" ]; then
           echo "Removing packageManager field from $PKG_DIR/package.json"
@@ -626,6 +748,8 @@ EOF
       nodeModulesDrv = mkPnpmNodeModules {
         inherit src lockFile includeDevDependencies;
         importer = effectiveImporter;
+        # Use legacy mode for backward compatibility
+        legacyWorkspaceMode = true;
       };
     in
     mkNodePackage ({
