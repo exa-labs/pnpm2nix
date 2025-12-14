@@ -354,7 +354,7 @@ EOF
     );
 
   # New function: mkPnpmNodeModules - returns just node_modules derivation
-  # "Holy" mode: src is the package root, link deps are derived from lockfile
+  # "Holy" mode: src is the package root, link deps are passed as explicit sources
   mkPnpmNodeModules = {
     src,
     lockFile,
@@ -362,8 +362,11 @@ EOF
     packagePath ? null,  # deprecated, use importer
     includeDevDependencies ? true,
     installLinkDeps ? true,
+    # Holy mode: explicit map of link dep names to their Nix store paths
+    # Example: { "escape-string-regexp" = ./path/to/escape-string-regexp; }
+    linkSources ? {},
     # Legacy mode: if true, use old workspace-root-based discovery
-    # If false (default for new code), use lockfile-based discovery with precise src
+    # If false (default for new code), use linkSources for link deps
     legacyWorkspaceMode ? false,
     ...
   }@args:
@@ -371,26 +374,24 @@ EOF
       # Use importer if provided, otherwise fall back to packagePath for backward compat
       effectiveImporter = if packagePath != null then packagePath else importer;
       
-      # Parse link deps from lockfile (uv2nix-style)
+      # Parse link deps from lockfile to get relative paths
       lockfileLinkDeps = parseLinkDepsFromLock lockFile;
       
-      # Compute the base directory for resolving link deps
-      # Link deps in pnpm-lock.yaml are relative to the lockfile's directory
-      lockFileDir = builtins.dirOf lockFile;
-      
-      # Compute Nix paths for each link dep (this makes them inputs to the derivation)
-      # Each path is relative to the lockfile directory (which is the package root)
-      # We use lockFileDir + "/${relativePath}" to resolve paths like "../third_party/foo"
+      # Build link dep paths from explicit linkSources (holy mode)
+      # Each entry in linkSources maps a package name to its Nix store path
       linkDepPaths = builtins.listToAttrs (builtins.map (dep: {
         name = dep.name;
         value = {
           relativePath = dep.relativePath;
-          # This creates a Nix path input - Nix will include it in the sandbox
-          # lockFileDir is a path, so + "/${relativePath}" resolves relative paths correctly
-          nixPath = lockFileDir + "/${dep.relativePath}";
+          # Use explicit source if provided, otherwise null (will fail if needed)
+          nixPath = if builtins.hasAttr dep.name linkSources 
+            then linkSources.${dep.name}
+            else null;
           # Check if the linked package has its own lockfile
-          lockFile = let p = lockFileDir + "/${dep.relativePath}/pnpm-lock.yaml"; in
-            if builtins.pathExists p then p else null;
+          lockFile = if builtins.hasAttr dep.name linkSources 
+            then let p = linkSources.${dep.name} + "/pnpm-lock.yaml"; in
+              if builtins.pathExists p then p else null
+            else null;
         };
       }) lockfileLinkDeps);
       
@@ -549,7 +550,8 @@ EOF
         ${if !legacyWorkspaceMode && builtins.length lockfileLinkDeps > 0 then ''
         # Holy mode: create symlinks from expected relative paths to Nix store paths
         echo "Setting up link: dependencies (holy mode)"
-        ${lib.concatStringsSep "\n" (lib.mapAttrsToList (name: info: ''
+        ${lib.concatStringsSep "\n" (lib.mapAttrsToList (name: info: 
+          if info.nixPath != null then ''
           LINK_REL_PATH="${info.relativePath}"
           LINK_NIX_PATH="${info.nixPath}"
           echo "Creating symlink: $LINK_REL_PATH -> $LINK_NIX_PATH"
@@ -558,7 +560,10 @@ EOF
             rm -rf "$LINK_REL_PATH"
           fi
           ln -s "$LINK_NIX_PATH" "$LINK_REL_PATH"
-        '') linkDepPaths)}
+          '' else ''
+          echo "Warning: No source provided for link dep ${name} (${info.relativePath})"
+          ''
+        ) linkDepPaths)}
         '' else ""}
 
         if [ -f "$PKG_DIR/package.json" ]; then
