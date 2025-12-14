@@ -374,16 +374,22 @@ EOF
       # Parse link deps from lockfile (uv2nix-style)
       lockfileLinkDeps = parseLinkDepsFromLock lockFile;
       
+      # Compute the base directory for resolving link deps
+      # Link deps in pnpm-lock.yaml are relative to the lockfile's directory
+      lockFileDir = builtins.dirOf lockFile;
+      
       # Compute Nix paths for each link dep (this makes them inputs to the derivation)
-      # Each path is relative to src (the package root)
+      # Each path is relative to the lockfile directory (which is the package root)
+      # We use lockFileDir + "/${relativePath}" to resolve paths like "../third_party/foo"
       linkDepPaths = builtins.listToAttrs (builtins.map (dep: {
         name = dep.name;
         value = {
           relativePath = dep.relativePath;
           # This creates a Nix path input - Nix will include it in the sandbox
-          nixPath = src + "/${dep.relativePath}";
+          # lockFileDir is a path, so + "/${relativePath}" resolves relative paths correctly
+          nixPath = lockFileDir + "/${dep.relativePath}";
           # Check if the linked package has its own lockfile
-          lockFile = let p = src + "/${dep.relativePath}/pnpm-lock.yaml"; in
+          lockFile = let p = lockFileDir + "/${dep.relativePath}/pnpm-lock.yaml"; in
             if builtins.pathExists p then p else null;
         };
       }) lockfileLinkDeps);
