@@ -379,17 +379,22 @@ EOF
       
       # Build link dep paths from explicit linkSources (holy mode)
       # Each entry in linkSources maps a package name to its Nix store path
+      # linkSources can be paths or flake inputs (which have outPath)
+      getPath = src: if builtins.isPath src then src 
+        else if builtins.isAttrs src && builtins.hasAttr "outPath" src then src.outPath
+        else toString src;
+      
       linkDepPaths = builtins.listToAttrs (builtins.map (dep: {
         name = dep.name;
         value = {
           relativePath = dep.relativePath;
           # Use explicit source if provided, otherwise null (will fail if needed)
           nixPath = if builtins.hasAttr dep.name linkSources 
-            then linkSources.${dep.name}
+            then getPath linkSources.${dep.name}
             else null;
           # Check if the linked package has its own lockfile
           lockFile = if builtins.hasAttr dep.name linkSources 
-            then let p = linkSources.${dep.name} + "/pnpm-lock.yaml"; in
+            then let p = (getPath linkSources.${dep.name}) + "/pnpm-lock.yaml"; in
               if builtins.pathExists p then p else null
             else null;
         };
@@ -518,10 +523,6 @@ EOF
       # Skip fixupPhase which includes noBrokenSymlinks check
       # We handle link: dependencies manually in buildPhase
       dontFixup = true;
-      
-      # In holy mode, pass the link dep Nix paths as derivation inputs
-      # This ensures Nix includes them in the sandbox
-      linkDepSrcs = if legacyWorkspaceMode then {} else linkDepPaths;
 
       buildPhase = ''
         set -euo pipefail
