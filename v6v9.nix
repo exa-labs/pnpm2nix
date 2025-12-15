@@ -354,19 +354,20 @@ EOF
     );
 
   # New function: mkPnpmNodeModules - returns just node_modules derivation
-  # "Holy" mode: src is the package root, link deps are passed as explicit sources
+  # uv2nix-style: workspaceRoot contains all local deps, paths resolved from lockfile
   mkPnpmNodeModules = {
-    src,
+    # Workspace root - should contain all local deps (like uv2nix's workspaceRoot)
+    # The flake's source tree is automatically big enough if you're in a monorepo
+    workspaceRoot,
+    # Path to pnpm-lock.yaml
     lockFile,
+    # Importer path relative to workspaceRoot (which package to build)
     importer ? ".",
     packagePath ? null,  # deprecated, use importer
     includeDevDependencies ? true,
     installLinkDeps ? true,
-    # Holy mode: explicit map of link dep names to their Nix store paths
-    # Example: { "escape-string-regexp" = ./path/to/escape-string-regexp; }
-    linkSources ? {},
-    # Legacy mode: if true, use old workspace-root-based discovery
-    # If false (default for new code), use linkSources for link deps
+    # Legacy mode: if true, use old package.json walking for link dep discovery
+    # If false (default), parse link deps from lockfile (uv2nix-style)
     legacyWorkspaceMode ? false,
     ...
   }@args:
@@ -374,34 +375,26 @@ EOF
       # Use importer if provided, otherwise fall back to packagePath for backward compat
       effectiveImporter = if packagePath != null then packagePath else importer;
       
-      # Parse link deps from lockfile to get relative paths
+      # Parse link deps from lockfile to get relative paths (uv2nix-style)
       lockfileLinkDeps = parseLinkDepsFromLock lockFile;
       
-      # Build link dep paths from explicit linkSources (holy mode)
-      # Each entry in linkSources maps a package name to its Nix store path
-      # linkSources can be paths or flake inputs (which have outPath)
-      getPath = src: if builtins.isPath src then src 
-        else if builtins.isAttrs src && builtins.hasAttr "outPath" src then src.outPath
-        else toString src;
-      
+      # Compute full paths for link deps using workspaceRoot + relativePath
+      # This is exactly how uv2nix does it: workspaceRoot + "/${localPath}"
       linkDepPaths = builtins.listToAttrs (builtins.map (dep: {
         name = dep.name;
         value = {
           relativePath = dep.relativePath;
-          # Use explicit source if provided, otherwise null (will fail if needed)
-          nixPath = if builtins.hasAttr dep.name linkSources 
-            then getPath linkSources.${dep.name}
-            else null;
+          # Compute the full path: workspaceRoot + importer + relativePath
+          # e.g., workspaceRoot + "/c" + "/../third_party/foo" = workspaceRoot + "/third_party/foo"
+          nixPath = workspaceRoot + "/${effectiveImporter}/${dep.relativePath}";
           # Check if the linked package has its own lockfile
-          lockFile = if builtins.hasAttr dep.name linkSources 
-            then let p = (getPath linkSources.${dep.name}) + "/pnpm-lock.yaml"; in
-              if builtins.pathExists p then p else null
-            else null;
+          lockFile = let p = workspaceRoot + "/${effectiveImporter}/${dep.relativePath}/pnpm-lock.yaml"; in
+            if builtins.pathExists p then p else null;
         };
       }) lockfileLinkDeps);
       
       # For legacy mode, use the old discovery method
-      legacyLinkDeps = if legacyWorkspaceMode then discoverLinkDeps src effectiveImporter else [];
+      legacyLinkDeps = if legacyWorkspaceMode then discoverLinkDeps workspaceRoot effectiveImporter else [];
       
       # Build link deps list for mkPnpmTarballs
       linkDepsForTarballs = if legacyWorkspaceMode then
@@ -415,18 +408,18 @@ EOF
       
       pnpmTarballs = mkPnpmTarballs { 
         inherit lockFile;
-        # In holy mode, we don't pass src to mkPnpmTarballs for discovery
-        # Instead, we pass the pre-computed link deps
-        src = if legacyWorkspaceMode then src else null;
+        # In uv2nix-style mode, we don't pass src to mkPnpmTarballs for discovery
+        # Instead, we pass the pre-computed link deps from lockfile
+        src = if legacyWorkspaceMode then workspaceRoot else null;
         packagePath = effectiveImporter;
         linkDepsOverride = if legacyWorkspaceMode then null else linkDepsForTarballs;
       };
 
-      # Compute lockfile directory relative to src
+      # Compute lockfile directory relative to workspaceRoot
       lockDir = builtins.dirOf lockFile;
       lockFileName = builtins.baseNameOf lockFile;
-      lockFileRelative = if lib.hasPrefix (toString src) (toString lockFile) then
-        lib.removePrefix "${toString src}/" (toString lockFile)
+      lockFileRelative = if lib.hasPrefix (toString workspaceRoot) (toString lockFile) then
+        lib.removePrefix "${toString workspaceRoot}/" (toString lockFile)
       else
         lockFileName;
       
@@ -511,7 +504,7 @@ EOF
     in
     pkgs.stdenvNoCC.mkDerivation {
       name = "pnpm-node-modules-${builtins.replaceStrings ["/"] ["-"] effectiveImporter}";
-      inherit src;
+      src = workspaceRoot;
 
       nativeBuildInputs = with pkgs; [
         nodejs
@@ -758,7 +751,8 @@ EOF
       effectiveImporter = if importer != null then importer else packagePath;
       
       nodeModulesDrv = mkPnpmNodeModules {
-        inherit src lockFile includeDevDependencies;
+        workspaceRoot = src;  # For backward compat, src is the workspace root
+        inherit lockFile includeDevDependencies;
         importer = effectiveImporter;
         # Use legacy mode for backward compatibility
         legacyWorkspaceMode = true;
