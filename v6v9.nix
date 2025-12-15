@@ -463,6 +463,12 @@ EOF
             if not os.path.exists(lockfile_path):
                 print(f"Warning: Lockfile {lockfile_path} does not exist, skipping")
                 return 0
+            
+            # Check if the lockfile is writable (not in nix store)
+            # Linked lockfiles that point to nix store paths are already patched
+            if not os.access(lockfile_path, os.W_OK):
+                print(f"Skipping read-only lockfile: {lockfile_path} (already in nix store)")
+                return 0
                 
             with open(lockfile_path, 'r') as f:
                 lockfile = yaml.load(f)
@@ -592,6 +598,12 @@ EOF
             LINK_PATH=$(echo "$link" | ${pkgs.jq}/bin/jq -r '.path')
             LINK_NAME=$(echo "$link" | ${pkgs.jq}/bin/jq -r '.name')
             
+            # Skip if linked path is in nix store (read-only, already built)
+            if [[ "$LINK_PATH" == /nix/store/* ]] || [[ "$(${pkgs.coreutils}/bin/realpath -m "$LINK_PATH")" == /nix/store/* ]]; then
+              echo "Skipping fetch for $LINK_NAME (in nix store, already built)"
+              continue
+            fi
+            
             if [ -f "$LINK_PATH/pnpm-lock.yaml" ]; then
               echo "Fetching dependencies for linked package $LINK_NAME at $LINK_PATH"
               ${pkgs.pnpm}/bin/pnpm fetch --offline --frozen-lockfile --store-dir "$STORE_DIR" --lockfile-dir "$LINK_PATH" --config.manage-package-manager-versions=false || echo "Warning: Failed to fetch for $LINK_PATH"
@@ -603,6 +615,12 @@ EOF
           ${pkgs.jq}/bin/jq -c '.[]' "${pnpmTarballs}/link-deps.json" | while read -r link; do
             LINK_PATH=$(echo "$link" | ${pkgs.jq}/bin/jq -r '.path')
             LINK_NAME=$(echo "$link" | ${pkgs.jq}/bin/jq -r '.name')
+            
+            # Skip if linked path is in nix store (read-only, already built)
+            if [[ "$LINK_PATH" == /nix/store/* ]] || [[ "$(${pkgs.coreutils}/bin/realpath -m "$LINK_PATH")" == /nix/store/* ]]; then
+              echo "Skipping install for $LINK_NAME (in nix store, already built)"
+              continue
+            fi
             
             if [ -f "$LINK_PATH/pnpm-lock.yaml" ]; then
               echo "Installing dependencies for linked package $LINK_NAME at $LINK_PATH"
@@ -632,6 +650,8 @@ EOF
             
             if [ -e "$ABS_PATH" ]; then
               echo "Fixing link: $LINK_NAME -> $ABS_PATH"
+              # Create parent directory for scoped packages (e.g., @scope/pkg)
+              mkdir -p "$(dirname "$DEST")"
               rm -rf "$DEST"
               ln -s "$ABS_PATH" "$DEST"
             else
