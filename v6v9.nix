@@ -355,6 +355,7 @@ EOF
 
   # New function: mkPnpmNodeModules - returns just node_modules derivation
   # uv2nix-style: workspaceRoot contains all local deps, paths resolved from lockfile
+  # For git submodule deps, use linkSources to override specific deps with explicit flake inputs
   mkPnpmNodeModules = {
     # Workspace root - should contain all local deps (like uv2nix's workspaceRoot)
     # The flake's source tree is automatically big enough if you're in a monorepo
@@ -366,6 +367,10 @@ EOF
     packagePath ? null,  # deprecated, use importer
     includeDevDependencies ? true,
     installLinkDeps ? true,
+    # Optional: explicit sources for link deps that are git submodules
+    # These override the workspaceRoot-based resolution for specific deps
+    # Example: { "escape-string-regexp" = escape-string-regexp-flake-input; }
+    linkSources ? {},
     # Legacy mode: if true, use old package.json walking for link dep discovery
     # If false (default), parse link deps from lockfile (uv2nix-style)
     legacyWorkspaceMode ? false,
@@ -378,17 +383,28 @@ EOF
       # Parse link deps from lockfile to get relative paths (uv2nix-style)
       lockfileLinkDeps = parseLinkDepsFromLock lockFile;
       
+      # Helper to extract path from flake input (which may be an attrset with outPath)
+      getPath = src: if builtins.isPath src then src 
+        else if builtins.isAttrs src && builtins.hasAttr "outPath" src then src.outPath
+        else toString src;
+      
       # Compute full paths for link deps using workspaceRoot + relativePath
-      # This is exactly how uv2nix does it: workspaceRoot + "/${localPath}"
+      # If a dep is in linkSources, use that instead (for git submodule deps)
       linkDepPaths = builtins.listToAttrs (builtins.map (dep: {
         name = dep.name;
         value = {
           relativePath = dep.relativePath;
-          # Compute the full path: workspaceRoot + importer + relativePath
-          # e.g., workspaceRoot + "/c" + "/../third_party/foo" = workspaceRoot + "/third_party/foo"
-          nixPath = workspaceRoot + "/${effectiveImporter}/${dep.relativePath}";
+          # Use explicit linkSource if provided, otherwise compute from workspaceRoot
+          nixPath = if builtins.hasAttr dep.name linkSources 
+            then getPath linkSources.${dep.name}
+            else workspaceRoot + "/${effectiveImporter}/${dep.relativePath}";
           # Check if the linked package has its own lockfile
-          lockFile = let p = workspaceRoot + "/${effectiveImporter}/${dep.relativePath}/pnpm-lock.yaml"; in
+          lockFile = let 
+            basePath = if builtins.hasAttr dep.name linkSources 
+              then getPath linkSources.${dep.name}
+              else workspaceRoot + "/${effectiveImporter}/${dep.relativePath}";
+            p = basePath + "/pnpm-lock.yaml"; 
+          in
             if builtins.pathExists p then p else null;
         };
       }) lockfileLinkDeps);
