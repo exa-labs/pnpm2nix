@@ -354,21 +354,30 @@ EOF
     );
 
   # New function: mkPnpmNodeModules - returns just node_modules derivation
-  # uv2nix-style: workspaceRoot contains all local deps, paths resolved from lockfile
-  # For git submodule deps, use linkSources to override specific deps with explicit flake inputs
+  # uv2nix-style: paths resolved from lockfile, minimal configuration needed
+  # 
+  # Simple usage (like uv2nix):
+  #   mkPnpmNodeModules { lockFile = ./pnpm-lock.yaml; }
+  #
+  # For git submodule deps only:
+  #   mkPnpmNodeModules { 
+  #     lockFile = ./pnpm-lock.yaml;
+  #     linkSources = { "escape-string-regexp" = escape-string-regexp; };
+  #   }
   mkPnpmNodeModules = {
-    # Workspace root - should contain all local deps (like uv2nix's workspaceRoot)
-    # The flake's source tree is automatically big enough if you're in a monorepo
-    workspaceRoot,
-    # Path to pnpm-lock.yaml
+    # Path to pnpm-lock.yaml (required)
     lockFile,
-    # Importer path relative to workspaceRoot (which package to build)
-    importer ? ".",
+    # Optional: workspace root for resolving link deps
+    # Defaults to directory containing lockFile (like uv2nix)
+    workspaceRoot ? null,
+    # Optional: importer path (only needed for multi-importer lockfiles)
+    # Defaults to "." for single-importer lockfiles
+    importer ? null,
     packagePath ? null,  # deprecated, use importer
     includeDevDependencies ? true,
     installLinkDeps ? true,
     # Optional: explicit sources for link deps that are git submodules
-    # These override the workspaceRoot-based resolution for specific deps
+    # Only needed when link deps are in git submodules (nix doesn't include submodules in flake source)
     # Example: { "escape-string-regexp" = escape-string-regexp-flake-input; }
     linkSources ? {},
     # Legacy mode: if true, use old package.json walking for link dep discovery
@@ -377,8 +386,13 @@ EOF
     ...
   }@args:
     let
-      # Use importer if provided, otherwise fall back to packagePath for backward compat
-      effectiveImporter = if packagePath != null then packagePath else importer;
+      # Derive workspaceRoot from lockFile if not provided (uv2nix-style)
+      effectiveWorkspaceRoot = if workspaceRoot != null then workspaceRoot else builtins.dirOf lockFile;
+      
+      # Use importer if provided, otherwise fall back to packagePath, otherwise default to "."
+      effectiveImporter = if importer != null then importer 
+        else if packagePath != null then packagePath 
+        else ".";
       
       # Parse link deps from lockfile to get relative paths (uv2nix-style)
       lockfileLinkDeps = parseLinkDepsFromLock lockFile;
@@ -388,21 +402,24 @@ EOF
         else if builtins.isAttrs src && builtins.hasAttr "outPath" src then src.outPath
         else toString src;
       
-      # Compute full paths for link deps using workspaceRoot + relativePath
+      # Compute full paths for link deps using lockfile directory + relativePath
       # If a dep is in linkSources, use that instead (for git submodule deps)
+      # This is the uv2nix pattern: lockFileDir + "/${relativePath}" resolves ../foo correctly
+      lockFileDir = builtins.dirOf lockFile;
       linkDepPaths = builtins.listToAttrs (builtins.map (dep: {
         name = dep.name;
         value = {
           relativePath = dep.relativePath;
-          # Use explicit linkSource if provided, otherwise compute from workspaceRoot
+          # Use explicit linkSource if provided, otherwise compute from lockFileDir
+          # lockFileDir + "/../foo" resolves correctly because Nix canonicalizes paths
           nixPath = if builtins.hasAttr dep.name linkSources 
             then getPath linkSources.${dep.name}
-            else workspaceRoot + "/${effectiveImporter}/${dep.relativePath}";
+            else lockFileDir + "/${dep.relativePath}";
           # Check if the linked package has its own lockfile
           lockFile = let 
             basePath = if builtins.hasAttr dep.name linkSources 
               then getPath linkSources.${dep.name}
-              else workspaceRoot + "/${effectiveImporter}/${dep.relativePath}";
+              else lockFileDir + "/${dep.relativePath}";
             p = basePath + "/pnpm-lock.yaml"; 
           in
             if builtins.pathExists p then p else null;
@@ -410,7 +427,7 @@ EOF
       }) lockfileLinkDeps);
       
       # For legacy mode, use the old discovery method
-      legacyLinkDeps = if legacyWorkspaceMode then discoverLinkDeps workspaceRoot effectiveImporter else [];
+      legacyLinkDeps = if legacyWorkspaceMode then discoverLinkDeps effectiveWorkspaceRoot effectiveImporter else [];
       
       # Build link deps list for mkPnpmTarballs
       linkDepsForTarballs = if legacyWorkspaceMode then
@@ -426,16 +443,16 @@ EOF
         inherit lockFile;
         # In uv2nix-style mode, we don't pass src to mkPnpmTarballs for discovery
         # Instead, we pass the pre-computed link deps from lockfile
-        src = if legacyWorkspaceMode then workspaceRoot else null;
+        src = if legacyWorkspaceMode then effectiveWorkspaceRoot else null;
         packagePath = effectiveImporter;
         linkDepsOverride = if legacyWorkspaceMode then null else linkDepsForTarballs;
       };
 
-      # Compute lockfile directory relative to workspaceRoot
+      # Compute lockfile directory relative to effectiveWorkspaceRoot
       lockDir = builtins.dirOf lockFile;
       lockFileName = builtins.baseNameOf lockFile;
-      lockFileRelative = if lib.hasPrefix (toString workspaceRoot) (toString lockFile) then
-        lib.removePrefix "${toString workspaceRoot}/" (toString lockFile)
+      lockFileRelative = if lib.hasPrefix (toString effectiveWorkspaceRoot) (toString lockFile) then
+        lib.removePrefix "${toString effectiveWorkspaceRoot}/" (toString lockFile)
       else
         lockFileName;
       
@@ -526,7 +543,7 @@ EOF
     in
     pkgs.stdenvNoCC.mkDerivation {
       name = "pnpm-node-modules-${builtins.replaceStrings ["/"] ["-"] effectiveImporter}";
-      src = workspaceRoot;
+      src = effectiveWorkspaceRoot;
 
       nativeBuildInputs = with pkgs; [
         nodejs
