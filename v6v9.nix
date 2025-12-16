@@ -152,8 +152,8 @@ let
     in
     if canonicalPath == "" then "." else canonicalPath;
 
-  # Parse link: dependencies from pnpm-lock.yaml (uv2nix-style: lockfile is source of truth)
-  parseLinkDepsFromLock = lockFile:
+  # Parse link: dependencies from a single pnpm-lock.yaml
+  parseLinkDepsFromSingleLock = lockFile:
     let
       text = builtins.readFile lockFile;
       lines = lib.splitString "\n" text;
@@ -205,6 +205,76 @@ let
       deps = if importersStart != null then parseDeps lines else [];
     in
     deps;
+
+  # Recursively discover ALL transitive link deps (uv2nix-style: build everything in one pass)
+  # This follows the chain: B -> C -> submodule, discovering all deps from their lockfiles
+  # linkSources is used to override paths for deps outside the flake source tree (git submodules)
+  discoverTransitiveLinkDeps = lockFile: linkSources:
+    let
+      lockFileDir = builtins.dirOf lockFile;
+      
+      # Helper to extract path from flake input
+      getPath = src: if builtins.isPath src then src 
+        else if builtins.isAttrs src && builtins.hasAttr "outPath" src then src.outPath
+        else toString src;
+      
+      # Recursive helper with visited set for cycle detection
+      discoverWithVisited = visited: currentLockFile:
+        let
+          currentLockDir = builtins.dirOf currentLockFile;
+          directDeps = parseLinkDepsFromSingleLock currentLockFile;
+          
+          # Process each direct dep
+          processDep = dep:
+            let
+              # Compute the absolute path for this dep
+              depPath = if builtins.hasAttr dep.name linkSources
+                then getPath linkSources.${dep.name}
+                else currentLockDir + "/${dep.relativePath}";
+              
+              # Canonicalize path for cycle detection
+              canonicalDepPath = toString depPath;
+              
+              # Check if this dep has its own lockfile
+              depLockFile = depPath + "/pnpm-lock.yaml";
+              hasLockFile = builtins.pathExists depLockFile;
+              
+              # Skip if already visited (cycle detection)
+              alreadyVisited = builtins.elem canonicalDepPath visited;
+              
+              # Recursively get transitive deps if not visited and has lockfile
+              transitiveDeps = if alreadyVisited || !hasLockFile then []
+                else discoverWithVisited (visited ++ [canonicalDepPath]) depLockFile;
+            in
+            # Return this dep plus its transitive deps
+            [{
+              name = dep.name;
+              relativePath = dep.relativePath;
+              nixPath = depPath;
+              fromLockFile = currentLockFile;
+            }] ++ transitiveDeps;
+          
+          # Process all direct deps and flatten
+          allDeps = builtins.concatLists (builtins.map processDep directDeps);
+        in
+        allDeps;
+      
+      # Start recursion with empty visited set
+      allTransitiveDeps = discoverWithVisited [] lockFile;
+      
+      # Deduplicate by name (keep first occurrence)
+      deduplicateByName = deps:
+        let
+          addIfNew = acc: dep:
+            if builtins.any (d: d.name == dep.name) acc then acc
+            else acc ++ [dep];
+        in
+        builtins.foldl' addIfNew [] deps;
+    in
+    deduplicateByName allTransitiveDeps;
+
+  # Legacy: Parse link deps from a single lockfile (non-recursive)
+  parseLinkDepsFromLock = parseLinkDepsFromSingleLock;
 
   # Discover link: dependencies recursively from package.json with cycle detection
   # (kept for backward compatibility, but new code should use parseLinkDepsFromLock)
@@ -394,37 +464,27 @@ EOF
         else if packagePath != null then packagePath 
         else ".";
       
-      # Parse link deps from lockfile to get relative paths (uv2nix-style)
-      lockfileLinkDeps = parseLinkDepsFromLock lockFile;
+      # uv2nix-style: Recursively discover ALL transitive link deps in one pass
+      # This follows B -> C -> submodule, building everything together
+      allTransitiveLinkDeps = discoverTransitiveLinkDeps lockFile linkSources;
       
       # Helper to extract path from flake input (which may be an attrset with outPath)
       getPath = src: if builtins.isPath src then src 
         else if builtins.isAttrs src && builtins.hasAttr "outPath" src then src.outPath
         else toString src;
       
-      # Compute full paths for link deps using lockfile directory + relativePath
-      # If a dep is in linkSources, use that instead (for git submodule deps)
-      # This is the uv2nix pattern: lockFileDir + "/${relativePath}" resolves ../foo correctly
+      # Build linkDepPaths from the transitive deps
       lockFileDir = builtins.dirOf lockFile;
       linkDepPaths = builtins.listToAttrs (builtins.map (dep: {
         name = dep.name;
         value = {
           relativePath = dep.relativePath;
-          # Use explicit linkSource if provided, otherwise compute from lockFileDir
-          # lockFileDir + "/../foo" resolves correctly because Nix canonicalizes paths
-          nixPath = if builtins.hasAttr dep.name linkSources 
-            then getPath linkSources.${dep.name}
-            else lockFileDir + "/${dep.relativePath}";
+          nixPath = dep.nixPath;
           # Check if the linked package has its own lockfile
-          lockFile = let 
-            basePath = if builtins.hasAttr dep.name linkSources 
-              then getPath linkSources.${dep.name}
-              else lockFileDir + "/${dep.relativePath}";
-            p = basePath + "/pnpm-lock.yaml"; 
-          in
+          lockFile = let p = dep.nixPath + "/pnpm-lock.yaml"; in
             if builtins.pathExists p then p else null;
         };
-      }) lockfileLinkDeps);
+      }) allTransitiveLinkDeps);
       
       # For legacy mode, use the old discovery method
       legacyLinkDeps = if legacyWorkspaceMode then discoverLinkDeps effectiveWorkspaceRoot effectiveImporter else [];
@@ -437,7 +497,7 @@ EOF
           name = dep.name;
           path = dep.relativePath;
           lockFile = linkDepPaths.${dep.name}.lockFile;
-        }) lockfileLinkDeps;
+        }) allTransitiveLinkDeps;
       
       pnpmTarballs = mkPnpmTarballs { 
         inherit lockFile;
