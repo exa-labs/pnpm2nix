@@ -640,7 +640,7 @@ EOF
         LOCK_FILE_REL="${lockFileRelative}"
         LOCK_DIR=$(dirname "$LOCK_FILE_REL")
 
-        ${if !legacyWorkspaceMode && builtins.length lockfileLinkDeps > 0 then ''
+        ${if !legacyWorkspaceMode && builtins.length allTransitiveLinkDeps > 0 then ''
         # Holy mode: create symlinks from expected relative paths to Nix store paths
         echo "Setting up link: dependencies (holy mode)"
         ${lib.concatStringsSep "\n" (lib.mapAttrsToList (name: info: 
