@@ -453,6 +453,9 @@ EOF
     # Legacy mode: if true, use old package.json walking for link dep discovery
     # If false (default), parse link deps from lockfile (uv2nix-style)
     legacyWorkspaceMode ? false,
+    # Skip transitive link dep discovery (useful when using linkWorkspace in mkNodePackage)
+    # Set to true when local deps are provided via flake inputs and linkWorkspace
+    skipTransitiveLinkDeps ? false,
     ...
   }@args:
     let
@@ -466,7 +469,8 @@ EOF
       
       # uv2nix-style: Recursively discover ALL transitive link deps in one pass
       # This follows B -> C -> submodule, building everything together
-      allTransitiveLinkDeps = discoverTransitiveLinkDeps lockFile linkSources;
+      # Skip if skipTransitiveLinkDeps is true (when using linkWorkspace in mkNodePackage)
+      allTransitiveLinkDeps = if skipTransitiveLinkDeps then [] else discoverTransitiveLinkDeps lockFile linkSources;
       
       # Helper to extract path from flake input (which may be an attrset with outPath)
       getPath = src: if builtins.isPath src then src 
