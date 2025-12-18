@@ -397,7 +397,8 @@ let
               hash = pkg.integrity;
             }
           else if isGitHubTarball then
-            # GitHub tarballs don't have integrity hashes, fetch without hash
+            # GitHub tarballs don't have integrity hashes, use builtins.fetchTarball
+            # This requires --impure flag when building
             builtins.fetchTarball {
               inherit url;
             }
