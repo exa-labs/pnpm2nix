@@ -79,12 +79,13 @@ let
                 integrity = extractIntegrity resStr;
                 tarball = extractTarball resStr;
               in
-              if integrity != null then
+              # Include packages with integrity hash OR with tarball URL (for GitHub tarballs)
+              if integrity != null || tarball != null then
                 {
                   current = state.current;
                   acc = state.acc ++ [{
                     key = state.current;
-                    inherit integrity;
+                    integrity = integrity;  # may be null for GitHub tarballs
                     tarball = tarball;
                   }];
                 }
@@ -378,13 +379,29 @@ let
         let
           parsed = parsePackageKey pkg.key;
           url = if pkg.tarball != null then pkg.tarball else makeTarballUrl parsed.name parsed.version;
+          # For GitHub tarballs without integrity hash, use fetchurl without hash
+          # This requires impure evaluation but is necessary for GitHub dependencies
+          isGitHubTarball = pkg.tarball != null && 
+            (lib.hasPrefix "https://codeload.github.com" pkg.tarball ||
+             lib.hasPrefix "https://github.com" pkg.tarball);
         in
         {
           key = pkg.key;
-          drv = pkgs.fetchurl {
-            inherit url;
-            hash = pkg.integrity;
-          };
+          drv = if pkg.integrity != null then
+            pkgs.fetchurl {
+              inherit url;
+              hash = pkg.integrity;
+            }
+          else if isGitHubTarball then
+            # GitHub tarballs don't have integrity hashes, fetch without hash
+            builtins.fetchTarball {
+              inherit url;
+            }
+          else
+            # Fallback: try to fetch without hash (will fail if not in cache)
+            pkgs.fetchurl {
+              inherit url;
+            };
         }
       ) uniquePackages;
 
