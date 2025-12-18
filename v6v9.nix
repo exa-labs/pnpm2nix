@@ -52,7 +52,11 @@ let
 
           processLine = state: line:
             let
-              pkgMatch = builtins.match "^  ([^:]+):[[:space:]]*$" line;
+              # Match package keys - handle both unquoted and quoted keys
+              # Quoted keys can contain : (e.g., '@exa-labs/prom-client@https://codeload.github.com/...')
+              pkgMatchQuoted = builtins.match "^  ['\"](.+)['\"]:[[:space:]]*$" line;
+              pkgMatchUnquoted = builtins.match "^  ([^:]+):[[:space:]]*$" line;
+              pkgMatch = if pkgMatchQuoted != null then pkgMatchQuoted else pkgMatchUnquoted;
               resMatch = builtins.match "^    resolution: [{](.*)[}][[:space:]]*$" line;
 
               extractIntegrity = resStr:
