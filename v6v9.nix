@@ -391,6 +391,8 @@ let
         in
         {
           key = pkg.key;
+          # Track if this is a directory (from builtins.fetchTarball) or file (from fetchurl)
+          isDir = isGitHubTarball && pkg.integrity == null;
           drv = if pkg.integrity != null then
             pkgs.fetchurl {
               inherit url;
@@ -399,6 +401,7 @@ let
           else if isGitHubTarball then
             # GitHub tarballs don't have integrity hashes, use builtins.fetchTarball
             # This requires --impure flag when building
+            # Note: builtins.fetchTarball returns a directory, not a file
             builtins.fetchTarball {
               inherit url;
             }
@@ -414,7 +417,12 @@ let
         builtins.listToAttrs (
           builtins.map (item: {
             name = item.key;
-            value = "${item.drv}";
+            # For directories (GitHub tarballs), the output will be basename.tgz
+            # For files (regular tarballs), the output is just the basename
+            value = if item.isDir then 
+              "${item.drv}.tgz"  # This will be replaced with actual path in runCommand
+            else 
+              "${item.drv}";
           }) tarballDrvs
         )
       );
@@ -426,11 +434,18 @@ let
       }) linkDeps);
 
     in
-    pkgs.runCommand "pnpm-tarballs" {} (
+    pkgs.runCommand "pnpm-tarballs" {
+      nativeBuildInputs = [ pkgs.gnutar pkgs.gzip ];
+    } (
       ''
         mkdir -p "$out"
       '' + lib.concatMapStringsSep "\n" (item:
-        ''cp "${item.drv}" "$out/$(basename "${item.drv}")"''
+        if item.isDir then
+          # For directories (from builtins.fetchTarball), re-tar them
+          ''tar -czf "$out/$(basename "${item.drv}").tgz" -C "${item.drv}" .''
+        else
+          # For files (from fetchurl), just copy
+          ''cp "${item.drv}" "$out/$(basename "${item.drv}")"''
       ) tarballDrvs + ''
         
         # Write manifest.json
