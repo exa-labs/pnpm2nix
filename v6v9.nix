@@ -417,10 +417,10 @@ let
         builtins.listToAttrs (
           builtins.map (item: {
             name = item.key;
-            # For directories (GitHub tarballs), the output will be basename.tgz
-            # For files (regular tarballs), the output is just the basename
+            # For directories (GitHub tarballs), store just the basename - patch.py will prepend pnpm-tarballs path
+            # For files (regular tarballs), use the full nix store path
             value = if item.isDir then 
-              "${item.drv}.tgz"  # This will be replaced with actual path in runCommand
+              "${builtins.baseNameOf item.drv}.tgz"  # Basename only, patch.py will resolve
             else 
               "${item.drv}";
           }) tarballDrvs
@@ -566,6 +566,7 @@ EOF
 
         manifest_path = '${pnpmTarballs}/manifest.json'
         link_deps_path = '${pnpmTarballs}/link-deps.json'
+        pnpm_tarballs_dir = '${pnpmTarballs}'
 
         with open(manifest_path, 'r') as f:
             manifest = json.load(f)
@@ -576,6 +577,13 @@ EOF
         yaml = YAML()
         yaml.preserve_quotes = True
         yaml.default_flow_style = False
+
+        def resolve_tarball_path(tarball_path):
+            """Resolve tarball path - if it's a basename, prepend pnpm-tarballs dir"""
+            if tarball_path.startswith('/'):
+                return tarball_path
+            else:
+                return os.path.join(pnpm_tarballs_dir, tarball_path)
 
         def patch_lockfile(lockfile_path):
             if not os.path.exists(lockfile_path):
@@ -601,11 +609,12 @@ EOF
 
             for section_name, section in sections_to_patch:
                 for key, tarball_path in manifest.items():
+                    resolved_path = resolve_tarball_path(tarball_path)
                     if key in section:
                         entry = section[key]
                         if isinstance(entry, dict) and 'resolution' in entry:
                             if isinstance(entry['resolution'], dict):
-                                entry['resolution']['tarball'] = f"file://{tarball_path}"
+                                entry['resolution']['tarball'] = f"file://{resolved_path}"
                                 patches_applied += 1
                     
                     if section_name == 'snapshots':
@@ -615,7 +624,7 @@ EOF
                                 entry = section[snapshot_key]
                                 if isinstance(entry, dict) and 'resolution' in entry:
                                     if isinstance(entry['resolution'], dict):
-                                        entry['resolution']['tarball'] = f"file://{tarball_path}"
+                                        entry['resolution']['tarball'] = f"file://{resolved_path}"
                                         patches_applied += 1
 
             with open(lockfile_path, 'w') as f:
