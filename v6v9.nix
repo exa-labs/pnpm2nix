@@ -383,17 +383,14 @@ let
         let
           parsed = parsePackageKey pkg.key;
           url = if pkg.tarball != null then pkg.tarball else makeTarballUrl parsed.name parsed.version;
-          # For GitHub tarballs without integrity hash, use fetchurl without hash
-          # This requires impure evaluation but is necessary for GitHub dependencies
           isGitHubTarball = pkg.tarball != null && 
             (lib.hasPrefix "https://codeload.github.com" pkg.tarball ||
              lib.hasPrefix "https://github.com" pkg.tarball);
+          hasExtraHash = extraTarballHashes ? ${url};
+          extraHash = extraTarballHashes.${url} or null;
         in
         {
           key = pkg.key;
-          # Track if this is a directory (from builtins.fetchTarball) or file (from fetchurl)
-          hasExtraHash = extraTarballHashes ? ${url};
-          extraHash = extraTarballHashes.${url} or null;
           isDir = isGitHubTarball && pkg.integrity == null && !hasExtraHash;
           drv = if pkg.integrity != null then
             pkgs.fetchurl {
