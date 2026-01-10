@@ -348,7 +348,7 @@ let
     in
     discoverLinkDepsWithVisited [] packagePath;
 
-  mkPnpmTarballs = { lockFile, src ? null, packagePath ? ".", linkDepsOverride ? null }:
+  mkPnpmTarballs = { lockFile, src ? null, packagePath ? ".", linkDepsOverride ? null, extraTarballHashes ? {} }:
     let
       # Use override if provided (holy mode), otherwise discover from src (legacy mode)
       linkDeps = if linkDepsOverride != null then
@@ -392,21 +392,23 @@ let
         {
           key = pkg.key;
           # Track if this is a directory (from builtins.fetchTarball) or file (from fetchurl)
-          isDir = isGitHubTarball && pkg.integrity == null;
+          hasExtraHash = extraTarballHashes ? ${url};
+          extraHash = extraTarballHashes.${url} or null;
+          isDir = isGitHubTarball && pkg.integrity == null && !hasExtraHash;
           drv = if pkg.integrity != null then
             pkgs.fetchurl {
               inherit url;
               hash = pkg.integrity;
             }
-          else if isGitHubTarball then
-            # GitHub tarballs don't have integrity hashes, use builtins.fetchTarball
-            # This requires --impure flag when building
-            # Note: builtins.fetchTarball returns a directory, not a file
-            builtins.fetchTarball {
+          else if isGitHubTarball && hasExtraHash then
+            pkgs.fetchzip {
               inherit url;
+              hash = extraHash;
+              stripRoot = true;
             }
+          else if isGitHubTarball then
+            throw "GitHub tarball ${url} requires a hash in extraTarballHashes for pure builds. Run: nix-prefetch-url --unpack '${url}' and add the hash to extraTarballHashes."
           else
-            # Fallback: try to fetch without hash (will fail if not in cache)
             pkgs.fetchurl {
               inherit url;
             };
@@ -493,6 +495,10 @@ EOF
     # Skip transitive link dep discovery (useful when using linkWorkspace in mkNodePackage)
     # Set to true when local deps are provided via flake inputs and linkWorkspace
     skipTransitiveLinkDeps ? false,
+    # Optional: explicit hashes for GitHub tarballs that don't have integrity in lockfile
+    # Required for pure builds (without --impure) when using GitHub dependencies
+    # Example: { "https://codeload.github.com/org/repo/tar.gz/commit" = "sha256-..."; }
+    extraTarballHashes ? {},
     ...
   }@args:
     let
@@ -541,7 +547,7 @@ EOF
         }) allTransitiveLinkDeps;
       
       pnpmTarballs = mkPnpmTarballs { 
-        inherit lockFile;
+        inherit lockFile extraTarballHashes;
         # In uv2nix-style mode, we don't pass src to mkPnpmTarballs for discovery
         # Instead, we pass the pre-computed link deps from lockfile
         src = if legacyWorkspaceMode then effectiveWorkspaceRoot else null;
