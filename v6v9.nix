@@ -391,7 +391,9 @@ let
         in
         {
           key = pkg.key;
-          isDir = isGitHubTarball && pkg.integrity == null && !hasExtraHash;
+          # isDir = true when we use fetchzip (which returns a directory)
+          # This happens for GitHub tarballs with extraTarballHashes
+          isDir = isGitHubTarball && pkg.integrity == null;
           drv = if pkg.integrity != null then
             pkgs.fetchurl {
               inherit url;
