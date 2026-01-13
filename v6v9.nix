@@ -379,20 +379,36 @@ let
           acc ++ [ pkg ]
       ) [] allPackages;
 
+      # Parse GitHub codeload URL to extract owner, repo, and commit
+      # URL format: https://codeload.github.com/{owner}/{repo}/tar.gz/{commit}
+      parseGitHubCodeloadUrl = url:
+        let
+          # Remove the prefix to get: {owner}/{repo}/tar.gz/{commit}
+          withoutPrefix = lib.removePrefix "https://codeload.github.com/" url;
+          parts = lib.splitString "/" withoutPrefix;
+        in
+        if builtins.length parts >= 4 then {
+          owner = builtins.elemAt parts 0;
+          repo = builtins.elemAt parts 1;
+          commit = builtins.elemAt parts 3;
+        } else null;
+
       tarballDrvs = builtins.map (pkg:
         let
           parsed = parsePackageKey pkg.key;
           url = if pkg.tarball != null then pkg.tarball else makeTarballUrl parsed.name parsed.version;
+          isGitHubCodeload = pkg.tarball != null && lib.hasPrefix "https://codeload.github.com" pkg.tarball;
           isGitHubTarball = pkg.tarball != null && 
-            (lib.hasPrefix "https://codeload.github.com" pkg.tarball ||
-             lib.hasPrefix "https://github.com" pkg.tarball);
+            (isGitHubCodeload || lib.hasPrefix "https://github.com" pkg.tarball);
           hasExtraHash = extraTarballHashes ? ${url};
           extraHash = extraTarballHashes.${url} or null;
+          # Parse GitHub codeload URL to get owner/repo/commit for fetchGit
+          ghParsed = if isGitHubCodeload then parseGitHubCodeloadUrl pkg.tarball else null;
         in
         {
           key = pkg.key;
-          # isDir = true when we use fetchzip (which returns a directory)
-          # This happens for GitHub tarballs with extraTarballHashes
+          # isDir = true when we use fetchzip or fetchGit (which return directories)
+          # This happens for GitHub tarballs without integrity hash
           isDir = isGitHubTarball && pkg.integrity == null;
           drv = if pkg.integrity != null then
             pkgs.fetchurl {
@@ -404,6 +420,15 @@ let
               inherit url;
               hash = extraHash;
               stripRoot = true;
+            }
+          # Pure nix solution: use builtins.fetchGit for GitHub codeload URLs
+          # This extracts owner/repo/commit from the URL and fetches via git
+          # No manual hashes needed - git commits are content-addressed
+          else if isGitHubCodeload && ghParsed != null then
+            builtins.fetchGit {
+              url = "https://github.com/${ghParsed.owner}/${ghParsed.repo}";
+              rev = ghParsed.commit;
+              allRefs = true;
             }
           else if isGitHubTarball then
             throw "GitHub tarball ${url} requires a hash in extraTarballHashes for pure builds. Run: nix-prefetch-url --unpack '${url}' and add the hash to extraTarballHashes."
